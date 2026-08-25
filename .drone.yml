@@ -1,0 +1,85 @@
+kind: pipeline
+type: kubernetes
+name: release
+
+metadata:
+  namespace: drone
+
+steps:
+  - name: release-preflight
+    image: oven/bun:1
+    commands:
+      - |
+        bun -e '
+          const cargo = Bun.TOML.parse(await Bun.file("companion/Cargo.toml").text());
+          const expected = "v" + cargo.package.version;
+          if (process.env.DRONE_TAG !== expected) {
+            console.error("tag mismatch: expected " + expected + ", got " + process.env.DRONE_TAG);
+            process.exit(1);
+          }
+        '
+
+  - name: bridge-version-preflight
+    image: oven/bun:1
+    commands:
+      - bun test tests/death_http_bridge.test.js
+  # The pipeline intentionally publishes companion artifacts only; it does not build or upload the VPK.
+  - name: release-notes
+    image: alpine/git:2.49.1
+    commands:
+      - git fetch --tags --force --unshallow || git fetch --tags --force
+      - |
+        previous_tag="$(git describe --tags --abbrev=0 "${DRONE_TAG}^" 2>/dev/null || true)"
+        if [ -n "$previous_tag" ]; then
+          range="$previous_tag..${DRONE_TAG}"
+        else
+          range="${DRONE_TAG}"
+        fi
+        git log "$range" --no-merges \
+          --pretty=format:'- [`%h`](https://github.com/${DRONE_REPO}/commit/%H) %s' \
+          > release-notes.md
+
+  - name: build-windows
+    image: rust:1.97-bookworm
+    environment:
+      CARGO_TARGET_DIR: companion/target/drone-windows
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+      - rustup target add x86_64-pc-windows-gnu
+      - cargo build --locked --release --target x86_64-pc-windows-gnu --manifest-path companion/Cargo.toml
+      - |
+        exe="companion/target/drone-windows/x86_64-pc-windows-gnu/release/companion.exe"
+        subsystem="$(x86_64-w64-mingw32-objdump -p "$exe" | sed -n '/^[[:space:]]*Subsystem[[:space:]]/p' | sed -n '1p')"
+        case "$subsystem" in
+          *"00000002"*"Windows GUI"*) ;;
+          *)
+            echo "companion.exe must use the Windows GUI subsystem; got: $subsystem"
+            exit 1
+            ;;
+        esac
+      - mkdir -p dist
+      - cp companion/target/drone-windows/x86_64-pc-windows-gnu/release/companion.exe "dist/deadlock-shock-${DRONE_TAG}-windows-x86_64.exe"
+
+  - name: build-linux
+    image: rust:1.97-bullseye
+    environment:
+      CARGO_TARGET_DIR: companion/target/drone-linux
+    commands:
+      - cargo build --locked --release --manifest-path companion/Cargo.toml
+      - mkdir -p dist
+      - tar -C companion/target/drone-linux/release --transform='s/^companion$/deadlock-shock/' -czf "dist/deadlock-shock-${DRONE_TAG}-linux-x86_64.tar.gz" companion
+
+  - name: publish
+    image: plugins/github-release
+    settings:
+      api_key:
+        from_secret: github-token
+      title: ${DRONE_TAG}
+      note: release-notes.md
+      files:
+        - dist/*
+      checksum: sha256
+
+trigger:
+  event:
+    - tag
