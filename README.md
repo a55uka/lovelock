@@ -1,5 +1,3 @@
-
-
 <a href="https://gamebanana.com/mods/710227"><img src="https://gamebanana.com/mods/embeddables/710227?type=large" alt="Lovelock mod on GameBanana" /></a>
 
 # Lovelock Companion
@@ -11,6 +9,10 @@ Lovelock Companion is a desktop app that syncs local-player deaths, kills, assis
 Lovelock Companion does not work by itself. Install and enable the [Lovelock mod from GameBanana](https://gamebanana.com/mods/710227) in Deadlock before starting the companion. The mod detects gameplay events and writes them to the log that the companion listens to.
 
 Huge shoutout to volc/bolc for creating the original DeadlockShock mod that Lovelock Companion is built on.
+
+## Disclaimer
+
+This is an unofficial, third-party mod and companion app, not affiliated with or endorsed by Valve. Using client mods is against most games' terms of service in some form, and Deadlock is no exception. Use it at your own risk. I am not liable for any bans, suspensions, or other consequences you receive from using this software.
 
 ## Getting Started (no coding required)
 
@@ -31,15 +33,15 @@ You don't need to build anything or know how to code to use this. Here's everyth
    ```
    This makes Deadlock write the log file Lovelock Companion reads from. Without it, nothing will work.
 
-3. **Download Lovelock Companion.** Grab `companion.exe` from this repo's [Releases page](https://github.com/asteriaow/lovelock/releases) — no installer needed, just download and run it.
+3. **Download Lovelock Companion.** Grab `companion.exe` from this repo's [Releases page](https://github.com/asteriaow/lovelock/releases). No installer needed, just download and run it.
 
 4. **Open the Lovense Remote app** and turn on **Game Mode**. Leave it running in the background.
 
-5. **Run `companion.exe`.** In the **Setup** tab, click **Test connection** — the default connection settings already work for the common case (Lovense Remote on the same PC), so you usually don't need to change anything. Once it's connected, optionally pick a specific toy (or leave it unselected to vibrate every connected toy).
+5. **Run `companion.exe`.** In the **Setup** tab, click **Test connection**. The default connection settings already work for the common case (Lovense Remote on the same PC), so you usually don't need to change anything. Once it's connected, optionally pick a specific toy (or leave it unselected to vibrate every connected toy).
 
 6. **Turn on your triggers.** Go to the **Effects** tab and enable whichever of Death, Kill, Assist, Ability use, and Cooldown ready you want (Death is on by default; the rest are opt-in). Adjust each trigger's vibration strength/duration to taste.
 
-7. **Launch Deadlock and play.** Lovelock Companion auto-detects the game and starts listening on its own — just leave the companion window open in the background.
+7. **Launch Deadlock and play.** Lovelock Companion auto-detects the game and starts listening on its own. Just leave the companion window open in the background.
 
 If something's not connecting, check **Menu → Show logs** inside the companion for live diagnostics.
 
