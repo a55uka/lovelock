@@ -3,7 +3,6 @@
 # Lovelock Companion
 
 Lovelock Companion is a desktop app that syncs local-player deaths, kills, assists, ability uses, and cooldown readiness in Deadlock to a Lovense toy over the local Standard API.
-Made because my friend complained about OCR missfiring for them.
 
 ## !!! Required Deadlock mod !!!
 
@@ -17,8 +16,9 @@ Lovelock Companion does not work by itself. Install and enable the [DeadlockShoc
   running on the same LAN. In **Setup**, enable Game Mode in the Lovense
   Remote app on the same PC, then Test connection. Connection settings, toy
   selection, and per-trigger vibration settings are all persisted.
-- `mod/` has the Panorama gameplay-state hook for the companion DeadlockShock
-  mod, which is what actually feeds Lovelock Companion its events.
+
+The DeadlockShock mod that feeds Lovelock Companion its game events is built
+and published separately; its source isn't part of this repo.
 
 ## Preview
 
@@ -26,16 +26,7 @@ Lovelock Companion does not work by itself. Install and enable the [DeadlockShoc
 
 ## Building from source
 
-You will need [Rust](https://rust-lang.org/), [PowerShell](https://learn.microsoft.com/en-us/powershell/), and [Reduced CSDK 12](https://deadlockmodding.pages.dev/modding-tools/csdk-12).
-
-From the repo root:
-
-```powershell
-.\build.bat
-cargo build --manifest-path companion/Cargo.toml --release
-```
-
-That puts the addon at `dist/deadlock_death_hook.vpk`. Install and enable it in Deadlock, then start Lovelock Companion:
+You will need [Rust](https://rust-lang.org/). Install and enable the DeadlockShock mod (see above), then build and run Lovelock Companion from the repo root:
 
 ```sh
 cargo run --manifest-path companion/Cargo.toml --release
@@ -60,16 +51,13 @@ Saved state is strict schema 7 JSON; anything else (including old multi-provider
 
 ## Publishing a release
 
-Lovelock Companion uses one lockstep Semantic Version for the companion, the DeadlockShock Panorama mod, Git tag, and GameBanana listing. Before publishing:
-
-1. Choose the release version and update `companion/Cargo.toml` plus `MOD_VERSION` in `mod/panorama/scripts/death_http_bridge.js` together.
-2. Run `bun test tests/death_http_bridge.test.js` and the affected companion tests; the bridge test verifies the cross-component version invariant.
-3. Build and smoke-test the VPK separately on Windows, then publish the mod on [GameBanana](https://gamebanana.com/mods/700758) with the same version.
-4. Push the matching tag only after the mod artifact/version is available:
+1. Choose the release version and update `companion/Cargo.toml`.
+2. Run the companion tests.
+3. Push the matching tag:
 
 ```sh
 git tag v<version>
 git push origin v<version>
 ```
 
-Drone verifies `DRONE_TAG == v<companion Cargo version>` and the emitted mod metadata before building companion artifacts. The current pipeline does not build or upload the VPK; do not claim a tagged release contains the addon unless it was built and verified separately.
+Drone verifies `DRONE_TAG == v<companion Cargo version>` before building and publishing the companion artifacts. The DeadlockShock mod VPK is built and published to GameBanana separately; Lovelock Companion warns in-app when the connected mod's reported version is older than the companion expects, so keep the GameBanana listing reasonably current with the companion release.

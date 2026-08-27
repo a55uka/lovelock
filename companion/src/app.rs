@@ -2058,10 +2058,6 @@ impl CompanionApp {
         app
     }
 
-    pub(crate) fn load_from_path(path: PathBuf) -> Self {
-        Self::load_from_path_with_detector(path, deadlock_path::detect)
-    }
-
     fn load_from_path_with_detector<F>(path: PathBuf, detector: F) -> Self
     where
         F: FnOnce() -> Result<Detection, DetectionError>,

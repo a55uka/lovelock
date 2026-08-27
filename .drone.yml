@@ -19,11 +19,7 @@ steps:
           }
         '
 
-  - name: bridge-version-preflight
-    image: oven/bun:1
-    commands:
-      - bun test tests/death_http_bridge.test.js
-  # The pipeline intentionally publishes companion artifacts only; it does not build or upload the VPK.
+  # The pipeline intentionally publishes companion artifacts only; the mod VPK is built and published separately.
   - name: release-notes
     image: alpine/git:2.49.1
     commands:
@@ -58,7 +54,7 @@ steps:
             ;;
         esac
       - mkdir -p dist
-      - cp companion/target/drone-windows/x86_64-pc-windows-gnu/release/companion.exe "dist/deadlock-shock-${DRONE_TAG}-windows-x86_64.exe"
+      - cp companion/target/drone-windows/x86_64-pc-windows-gnu/release/companion.exe "dist/lovelock-companion-${DRONE_TAG}-windows-x86_64.exe"
 
   - name: build-linux
     image: rust:1.97-bullseye
@@ -67,7 +63,7 @@ steps:
     commands:
       - cargo build --locked --release --manifest-path companion/Cargo.toml
       - mkdir -p dist
-      - tar -C companion/target/drone-linux/release --transform='s/^companion$/deadlock-shock/' -czf "dist/deadlock-shock-${DRONE_TAG}-linux-x86_64.tar.gz" companion
+      - tar -C companion/target/drone-linux/release --transform='s/^companion$/lovelock-companion/' -czf "dist/lovelock-companion-${DRONE_TAG}-linux-x86_64.tar.gz" companion
 
   - name: publish
     image: plugins/github-release
