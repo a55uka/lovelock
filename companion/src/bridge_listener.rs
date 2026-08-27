@@ -630,10 +630,9 @@ fn worker_loop(
                 );
             }
             Ok(path_metadata) => {
-                let path_identity = FileIdentity::from_metadata(&path_metadata);
-                let replaced = match open_log.as_ref() {
-                    Some(log) => log.identity != path_identity,
-                    None => false,
+                let replaced = match (FileIdentity::from_path(&path), open_log.as_ref()) {
+                    (Ok(path_identity), Some(log)) => log.identity != path_identity,
+                    _ => false,
                 };
                 if replaced {
                     log::info!(
@@ -713,7 +712,7 @@ fn worker_loop(
 
 fn open_log_file(path: &Path, skip_existing: bool) -> io::Result<OpenLog> {
     let mut file = File::open(path)?;
-    let identity = FileIdentity::from_metadata(&file.metadata()?);
+    let identity = FileIdentity::from_file(&file)?;
     let offset = file.seek(if skip_existing {
         SeekFrom::End(0)
     } else {
@@ -1033,28 +1032,57 @@ struct FileIdentity {
 
 #[cfg(unix)]
 impl FileIdentity {
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
+    fn from_path(path: &Path) -> io::Result<Self> {
+        Self::from_metadata(&fs::metadata(path)?)
+    }
+
+    fn from_file(file: &File) -> io::Result<Self> {
+        Self::from_metadata(&file.metadata()?)
+    }
+
+    fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
         use std::os::unix::fs::MetadataExt;
-        Self {
+        Ok(Self {
             device: metadata.dev(),
             inode: metadata.ino(),
-        }
+        })
     }
 }
 
 #[cfg(windows)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileIdentity {
-    creation_time: u64,
+    // NTFS file ID (volume + file index), not creation_time: NTFS "tunneling"
+    // reuses a deleted file's creation timestamp for a same-named file
+    // recreated within ~15s, which would otherwise hide a genuine log
+    // rotation from truncation/replacement detection.
+    volume_serial_number: u32,
+    file_index: u64,
 }
 
 #[cfg(windows)]
 impl FileIdentity {
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
-        use std::os::windows::fs::MetadataExt;
-        Self {
-            creation_time: metadata.creation_time(),
+    fn from_path(path: &Path) -> io::Result<Self> {
+        let file = File::open(path)?;
+        Self::from_file(&file)
+    }
+
+    fn from_file(file: &File) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let succeeded = unsafe { GetFileInformationByHandle(handle, &mut info) };
+        if succeeded == 0 {
+            return Err(io::Error::last_os_error());
         }
+        Ok(Self {
+            volume_serial_number: info.dwVolumeSerialNumber,
+            file_index: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        })
     }
 }
 
@@ -1066,10 +1094,18 @@ struct FileIdentity {
 
 #[cfg(not(any(unix, windows)))]
 impl FileIdentity {
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
-        Self {
+    fn from_path(path: &Path) -> io::Result<Self> {
+        Self::from_metadata(&fs::metadata(path)?)
+    }
+
+    fn from_file(file: &File) -> io::Result<Self> {
+        Self::from_metadata(&file.metadata()?)
+    }
+
+    fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
+        Ok(Self {
             created: metadata.created().ok(),
-        }
+        })
     }
 }
 
