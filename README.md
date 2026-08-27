@@ -8,6 +8,8 @@ Lovelock Companion is a desktop app that syncs local-player deaths, kills, assis
 
 Lovelock Companion does not work by itself. Install and enable the [DeadlockShock mod from GameBanana](https://gamebanana.com/mods/700758) in Deadlock before starting the companion. The mod detects gameplay events and writes them to the log that the companion listens to.
 
+Huge shoutout to volc/bolc for creating the original DeadlockShock mod that Lovelock Companion is built on.
+
 ## Contents
 
 - `companion/` is Lovelock Companion, the Lovense-only desktop app.
