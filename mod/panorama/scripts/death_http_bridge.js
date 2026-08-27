@@ -8,8 +8,6 @@
     var localPlayerPanel = null;
     var deathBaselineEstablished = false;
     var wasDead = false;
-    var lastKills = null;
-    var lastAssists = null;
     var sequence = 0;
     var abilityRoot = null;
     var abilityHeroIdentity = null;
@@ -18,12 +16,12 @@
     var lastAbilityCatalogSignature = null;
     var sessionId = Date.now().toString(36) + "-" + Math.floor(Math.random() * 0x1000000).toString(36);
     // Loading/hero-select -> match transitions recreate the top bar player
-    // panel, which resets the death/kill/assist baseline. The "not yet
-    // spawned" state during hero-select/loading reads as Dead for the
-    // duration of that phase (observed ~14s in practice), not just a single
-    // frame, so the settle window has to cover the whole loading phase, not
-    // just a UI-refresh blip. A real death this early into a fresh baseline
-    // is very unlikely, since baselines (re)establish at match start.
+    // panel, which resets the death baseline. The "not yet spawned" state
+    // during hero-select/loading reads as Dead for the duration of that
+    // phase (observed ~14s in practice), not just a single frame, so the
+    // settle window has to cover the whole loading phase, not just a
+    // UI-refresh blip. A real death this early into a fresh baseline is
+    // very unlikely, since baselines (re)establish at match start.
     var BASELINE_SETTLE_POLLS = 250; // ~25s at POLL_INTERVAL_SECONDS = 0.1
     var baselineSettlePollsRemaining = 0;
 
@@ -159,15 +157,6 @@
     function textFromClass(panel, className) {
         var matches = findChildrenWithClass(panel, className);
         return matches.length > 0 ? panelProperty(matches[0], "text") : null;
-    }
-
-    function statValue(panel, className) {
-        var text = textFromClass(panel, className);
-        if (text === null) {
-            return null;
-        }
-        var value = Number(text);
-        return isFinite(value) && value >= 0 ? Math.floor(value) : null;
     }
 
     function highestContextAncestor() {
@@ -465,56 +454,24 @@
         }
 
         var isDead = panelHasClass(player, "Dead");
-        var kills = statValue(player, "kills");
-        var assists = statValue(player, "assists");
 
         var forceAbilityBaseline = false;
         if (!deathBaselineEstablished) {
             wasDead = isDead;
-            lastKills = kills;
-            lastAssists = assists;
             deathBaselineEstablished = true;
             baselineSettlePollsRemaining = BASELINE_SETTLE_POLLS;
             forceAbilityBaseline = true;
         } else if (baselineSettlePollsRemaining > 0) {
             baselineSettlePollsRemaining--;
             wasDead = isDead;
-            if (kills !== null) {
-                lastKills = kills;
-            }
-            if (assists !== null) {
-                lastAssists = assists;
-            }
-        } else {
-            if (isDead !== wasDead) {
-                forceAbilityBaseline = true;
-                if (isDead) {
-                    emitAction("local_player_death", {
-                        detection: "top_bar_local_player_dead_class"
-                    });
-                }
-                wasDead = isDead;
-            }
-            if (kills !== null && lastKills !== null && kills > lastKills) {
-                emitAction("local_player_kill", {
-                    detection: "top_bar_kills_stat_increment",
-                    kills_before: lastKills,
-                    kills_after: kills
+        } else if (isDead !== wasDead) {
+            forceAbilityBaseline = true;
+            if (isDead) {
+                emitAction("local_player_death", {
+                    detection: "top_bar_local_player_dead_class"
                 });
             }
-            if (kills !== null) {
-                lastKills = kills;
-            }
-            if (assists !== null && lastAssists !== null && assists > lastAssists) {
-                emitAction("local_player_assist", {
-                    detection: "top_bar_assists_stat_increment",
-                    assists_before: lastAssists,
-                    assists_after: assists
-                });
-            }
-            if (assists !== null) {
-                lastAssists = assists;
-            }
+            wasDead = isDead;
         }
 
         pollAbilities(forceAbilityBaseline || isDead);
