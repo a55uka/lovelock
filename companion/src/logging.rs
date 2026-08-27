@@ -182,7 +182,7 @@ pub fn init_logging() -> LogStore {
     let store = LogStore::new();
     let writer = CapturingWriter::new(store.clone(), io::stderr());
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("warn,companion=info"),
+        env_logger::Env::default().default_filter_or("warn,companion=info,lovense=debug"),
     )
     .format_timestamp_millis()
     .format_module_path(true)

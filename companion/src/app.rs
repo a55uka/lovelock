@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::action::{ActionSettings, ResolvedAction};
+use crate::action::{ResolvedVibrateAction, VibrateActionSettings};
 use crate::bridge_listener::{
     AbilityTrigger, BridgeEvent, ConsoleLogListener, CountTrigger, ListenerPhase, ListenerStatus,
     LocalPlayerDeath, ModVersionObservation,
@@ -13,10 +13,7 @@ use crate::bridge_listener::{
 use crate::deadlock_path::{self, Detection, DetectionError};
 use crate::logging::{LogSnapshot, LogStore};
 use crate::persistence::{PersistedState, Persistence, default_state_path};
-use crate::provider::{
-    ConnectedProvider, ProviderConnectionConfig, ProviderError, ProviderKind, ProviderSettings,
-    ProviderTarget, TargetId, TestActionKind,
-};
+use crate::provider::{ConnectedProvider, ProviderError, ProviderSettings, ProviderTarget, TargetId};
 use crate::version_check::{
     COMPANION_RELEASE_URL, LATEST_RELEASE_URL, MOD_RELEASE_URL, VersionCheckOwner,
     VersionCheckState, WarningSelection, app_version, select_warnings,
@@ -25,11 +22,13 @@ use egui::{Color32, TextEdit, Ui};
 
 pub(crate) const ACTION_QUEUE_CAPACITY: usize = 10;
 pub(crate) const MAX_ACTION_QUEUE_AGE: Duration = Duration::from_secs(30);
+const PROVIDER_LABEL: &str = "Lovense";
+const ACTION_KIND_LABEL: &str = "vibrate";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TriggerSettings {
     pub enabled: bool,
-    pub actions: ActionSettings,
+    pub actions: VibrateActionSettings,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,7 +67,7 @@ pub struct TriggerSettingsSet {
 }
 impl Default for TriggerSettingsSet {
     fn default() -> Self {
-        let actions = ActionSettings::default();
+        let actions = VibrateActionSettings::default();
         Self {
             death: TriggerSettings {
                 enabled: true,
@@ -111,17 +110,17 @@ pub enum CredentialState {
 impl CredentialState {
     fn label(self) -> &'static str {
         match self {
-            Self::Unknown => "Provider setup not tested.",
-            Self::Testing => "Testing provider setup…",
-            Self::Valid => "Provider setup valid.",
-            Self::Invalid => "Provider setup invalid.",
+            Self::Unknown => "Not tested yet",
+            Self::Testing => "Testing connection…",
+            Self::Valid => "Connected",
+            Self::Invalid => "Connection failed",
         }
     }
-    fn color(self) -> [f32; 4] {
+    fn tone(self) -> crate::theme::BadgeTone {
         match self {
-            Self::Unknown | Self::Testing => [0.65, 0.65, 0.65, 1.0],
-            Self::Valid => [0.30, 0.78, 0.42, 1.0],
-            Self::Invalid => [0.92, 0.32, 0.28, 1.0],
+            Self::Unknown | Self::Testing => crate::theme::BadgeTone::Neutral,
+            Self::Valid => crate::theme::BadgeTone::Success,
+            Self::Invalid => crate::theme::BadgeTone::Danger,
         }
     }
 }
@@ -142,11 +141,11 @@ impl LogDetectionStatus {
             Self::Failed(message) => message,
         }
     }
-    fn color(&self) -> [f32; 4] {
+    fn tone(&self) -> crate::theme::BadgeTone {
         match self {
-            Self::Found => [0.30, 0.78, 0.42, 1.0],
-            Self::NotCreated => [0.92, 0.68, 0.22, 1.0],
-            Self::Failed(_) => [0.92, 0.32, 0.28, 1.0],
+            Self::Found => crate::theme::BadgeTone::Success,
+            Self::NotCreated => crate::theme::BadgeTone::Warning,
+            Self::Failed(_) => crate::theme::BadgeTone::Danger,
         }
     }
 }
@@ -169,13 +168,7 @@ type ConnectionResult = Result<(ConnectedProvider, Vec<ProviderTarget>), Provide
 type TestActionResult = Result<(), ProviderError>;
 fn provider_error_kind(error: &ProviderError) -> &'static str {
     match error {
-        ProviderError::PiShock(_) => "pishock",
-        ProviderError::OpenShock(_) => "openshock",
         ProviderError::Lovense(_) => "lovense",
-        ProviderError::ConnectionConfigMismatch => "connection_config_mismatch",
-        ProviderError::TargetProviderMismatch => "target_provider_mismatch",
-        ProviderError::ActionProviderMismatch => "action_provider_mismatch",
-        ProviderError::TargetRequired => "target_required",
         ProviderError::InvalidSetup => "invalid_setup",
         ProviderError::NotConnected => "not_connected",
     }
@@ -189,16 +182,16 @@ enum TestActionStatus {
 impl TestActionStatus {
     fn label(&self) -> &str {
         match self {
-            Self::Sending => "Sending test sound…",
-            Self::Sent => "Test sound sent.",
+            Self::Sending => "Sending test vibration…",
+            Self::Sent => "Test vibration sent.",
             Self::Failed(message) => message,
         }
     }
-    fn color(&self) -> [f32; 4] {
+    fn tone(&self) -> crate::theme::BadgeTone {
         match self {
-            Self::Sending => [0.65, 0.65, 0.65, 1.0],
-            Self::Sent => [0.30, 0.78, 0.42, 1.0],
-            Self::Failed(_) => [0.92, 0.32, 0.28, 1.0],
+            Self::Sending => crate::theme::BadgeTone::Neutral,
+            Self::Sent => crate::theme::BadgeTone::Success,
+            Self::Failed(_) => crate::theme::BadgeTone::Danger,
         }
     }
 }
@@ -270,6 +263,7 @@ enum AppSection {
     Setup,
     Effects,
     GameConnection,
+    Donate,
 }
 
 impl AppSection {
@@ -278,9 +272,13 @@ impl AppSection {
             Self::Setup => "Setup",
             Self::Effects => "Effects",
             Self::GameConnection => "Game connection",
+            Self::Donate => "Donate",
         }
     }
 }
+
+const KOFI_URL: &str = "https://ko-fi.com/asteriaxo";
+const VOLC_PROFILE_URL: &str = "https://gamebanana.com/members/5741016";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TriggerIdentity {
@@ -364,24 +362,21 @@ impl TriggerIdentity {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActionRequest {
-    provider: ProviderKind,
     target: Option<ProviderTarget>,
-    resolved: ResolvedAction,
+    resolved: ResolvedVibrateAction,
     trigger: TriggerIdentity,
     queued_at: Instant,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActionSnapshot {
-    provider: ProviderKind,
     target: Option<ProviderTarget>,
-    resolved: Option<ResolvedAction>,
+    resolved: Option<ResolvedVibrateAction>,
     trigger: TriggerIdentity,
 }
 impl ActionSnapshot {
     fn from_request(request: &ActionRequest) -> Self {
         Self {
-            provider: request.provider,
             target: request.target.clone(),
             resolved: Some(request.resolved),
             trigger: request.trigger.clone(),
@@ -444,28 +439,24 @@ impl ActionStatus {
             .as_ref()
             .map(|target| target.name())
             .unwrap_or("no target");
-        let action = snapshot.provider.action_kind().label();
+        let action = ACTION_KIND_LABEL;
         let resolved = snapshot
             .resolved
-            .map(ResolvedAction::summary)
+            .map(ResolvedVibrateAction::summary)
             .unwrap_or_else(|| "settings unavailable".to_owned());
         let trigger = snapshot.trigger.status_description();
         match self {
-            Self::Sending(_) => format!(
-                "{}: Sending {action} to {target} at {resolved} ({trigger})…",
-                snapshot.provider.label()
-            ),
-            Self::Sent(_) => format!(
-                "{}: {action} sent to {target} at {resolved} ({trigger}).",
-                snapshot.provider.label()
-            ),
+            Self::Sending(_) => {
+                format!("{PROVIDER_LABEL}: Sending {action} to {target} at {resolved} ({trigger})…")
+            }
+            Self::Sent(_) => {
+                format!("{PROVIDER_LABEL}: {action} sent to {target} at {resolved} ({trigger}).")
+            }
             Self::Failed { error, .. } => format!(
-                "{}: {action} failed for {target} at {resolved} ({trigger}): {error}",
-                snapshot.provider.label()
+                "{PROVIDER_LABEL}: {action} failed for {target} at {resolved} ({trigger}): {error}"
             ),
             Self::Skipped { reason, .. } => format!(
-                "{}: {action} skipped for {target} at {resolved} ({trigger}): {reason}",
-                snapshot.provider.label()
+                "{PROVIDER_LABEL}: {action} skipped for {target} at {resolved} ({trigger}): {reason}"
             ),
         }
     }
@@ -502,7 +493,6 @@ fn spawn_action_worker() -> (SyncSender<ActionJob>, Receiver<ActionCompletion>) 
 }
 
 pub struct AppState {
-    pub provider: ProviderKind,
     pub provider_settings: ProviderSettings,
     pub credential_state: CredentialState,
     pub devices: Vec<ProviderTarget>,
@@ -513,6 +503,7 @@ pub struct AppState {
     client: Option<Arc<ConnectedProvider>>,
     connection_error: Option<String>,
     connection_result: Option<Receiver<ConnectionResult>>,
+    device_refresh_result: Option<Receiver<Result<Vec<ProviderTarget>, ProviderError>>>,
     test_action_result: Option<Receiver<TestActionResult>>,
     test_action_status: Option<TestActionStatus>,
     action_sender: SyncSender<ActionJob>,
@@ -535,7 +526,6 @@ impl Default for AppState {
     fn default() -> Self {
         let (action_sender, action_result) = spawn_action_worker();
         Self {
-            provider: ProviderKind::default(),
             provider_settings: ProviderSettings::default(),
             credential_state: CredentialState::default(),
             devices: Vec::new(),
@@ -546,6 +536,7 @@ impl Default for AppState {
             client: None,
             connection_error: None,
             connection_result: None,
+            device_refresh_result: None,
             test_action_result: None,
             test_action_status: None,
             action_sender,
@@ -571,10 +562,7 @@ impl AppState {
         self.provider_settings.clone()
     }
     pub fn credentials_present(&self) -> bool {
-        self.provider_settings.setup_present(self.provider)
-    }
-    fn provider_connection_config(&self) -> ProviderConnectionConfig {
-        self.provider_settings.connection_config(self.provider)
+        self.provider_settings.present()
     }
     pub fn selected_device(&self) -> Option<&ProviderTarget> {
         let selected = self.selected_device.as_ref()?;
@@ -583,6 +571,9 @@ impl AppState {
     fn connection_in_progress(&self) -> bool {
         self.connection_result.is_some()
     }
+    fn device_refresh_in_progress(&self) -> bool {
+        self.device_refresh_result.is_some()
+    }
     fn test_action_in_progress(&self) -> bool {
         self.test_action_result.is_some()
     }
@@ -590,7 +581,10 @@ impl AppState {
         self.action_in_flight != 0
     }
     pub(crate) fn is_busy(&self) -> bool {
-        self.connection_in_progress() || self.test_action_in_progress() || self.action_in_progress()
+        self.connection_in_progress()
+            || self.device_refresh_in_progress()
+            || self.test_action_in_progress()
+            || self.action_in_progress()
     }
     pub(crate) fn reset_saved_state(&mut self) -> bool {
         if self.is_busy() {
@@ -600,7 +594,6 @@ impl AppState {
 
         self.bridge_listener.stop();
         self.reset_connection();
-        self.provider = ProviderKind::default();
         self.provider_settings = ProviderSettings::default();
         self.preferred_target = None;
         self.triggers = TriggerSettingsSet::default();
@@ -618,7 +611,7 @@ impl AppState {
         self.copy_feedback = None;
         self.action_status = None;
         self.action_in_flight = 0;
-        log::info!(target: "companion::app", "settings_reset_applied provider={}", self.provider.label());
+        log::info!(target: "companion::app", "settings_reset_applied provider={PROVIDER_LABEL}");
         true
     }
     #[cfg(test)]
@@ -637,67 +630,38 @@ impl AppState {
 
     fn reset_connection(&mut self) {
         if let Some(client) = self.client.take() {
-            let provider = client.kind().label();
             match Arc::try_unwrap(client) {
                 Ok(client) => match client.disconnect() {
                     Ok(()) => log::info!(
                         target: "companion::app",
-                        "provider_disconnected provider={provider} outcome=success"
+                        "provider_disconnected provider={PROVIDER_LABEL} outcome=success"
                     ),
                     Err(error) => log::warn!(
                         target: "companion::app",
-                        "provider_disconnected provider={provider} outcome=failed error_kind={}",
+                        "provider_disconnected provider={PROVIDER_LABEL} outcome=failed error_kind={}",
                         provider_error_kind(&error)
                     ),
                 },
                 Err(_) => log::debug!(
                     target: "companion::app",
-                    "provider_disconnect_skipped provider={provider} reason=shared_client"
+                    "provider_disconnect_skipped provider={PROVIDER_LABEL} reason=shared_client"
                 ),
             }
         }
         self.credential_state = CredentialState::Unknown;
         self.connection_result = None;
+        self.device_refresh_result = None;
         self.devices.clear();
         self.selected_device = None;
         self.connection_error = None;
         self.test_action_result = None;
         self.test_action_status = None;
     }
-    fn set_provider(&mut self, provider: ProviderKind) {
-        if self.provider == provider {
-            return;
-        }
-        if self.connection_in_progress()
-            || self.test_action_in_progress()
-            || self.action_in_progress()
-        {
-            log::debug!(
-                target: "companion::app",
-                "provider_change_skipped from={} to={} reason=busy",
-                self.provider.label(),
-                provider.label()
-            );
-            return;
-        }
-        let previous = self.provider;
-        self.provider = provider;
-        self.preferred_target = None;
-        self.reset_connection();
-        log::info!(
-            target: "companion::app",
-            "provider_changed from={} to={}",
-            previous.label(),
-            provider.label()
-        );
-    }
     fn start_connection_test(&mut self, context: egui::Context) {
-        let provider = self.provider;
-        let config = self.provider_connection_config();
+        let config = self.provider_settings.lovense.normalized();
         log::info!(
             target: "companion::app",
-            "connection_test_started provider={}",
-            provider.label()
+            "connection_test_started provider={PROVIDER_LABEL}"
         );
         self.reset_connection();
         let (sender, receiver) = mpsc::channel();
@@ -705,7 +669,7 @@ impl AppState {
         self.connection_error = None;
         self.connection_result = Some(receiver);
         thread::spawn(move || {
-            let result = ConnectedProvider::connect(provider, &config).and_then(|client| {
+            let result = ConnectedProvider::connect(&config).and_then(|client| {
                 let devices = client.list_targets()?;
                 Ok((client, devices))
             });
@@ -726,8 +690,7 @@ impl AppState {
             Err(TryRecvError::Disconnected) => {
                 log::error!(
                     target: "companion::app",
-                    "connection_worker_failed provider={} reason=channel_closed",
-                    self.provider.label()
+                    "connection_worker_failed provider={PROVIDER_LABEL} reason=channel_closed"
                 );
                 self.connection_result = None;
                 self.apply_connection_error(ProviderError::NotConnected);
@@ -735,14 +698,60 @@ impl AppState {
         }
     }
 
+    fn start_device_refresh(&mut self, context: egui::Context) {
+        let Some(client) = self.client.clone() else {
+            log::warn!(target: "companion::app", "device_refresh_skipped outcome=skipped error_kind=not_connected");
+            return;
+        };
+        log::info!(target: "companion::app", "device_refresh_started provider={PROVIDER_LABEL}");
+        let (sender, receiver) = mpsc::channel();
+        self.device_refresh_result = Some(receiver);
+        thread::spawn(move || {
+            let result = client.list_targets();
+            let _ = sender.send(result);
+            context.request_repaint();
+        });
+    }
+    fn poll_device_refresh(&mut self) {
+        let Some(receiver) = &self.device_refresh_result else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(devices)) => {
+                self.device_refresh_result = None;
+                log::info!(
+                    target: "companion::app",
+                    "device_refresh_succeeded provider={PROVIDER_LABEL} targets={}",
+                    devices.len()
+                );
+                self.apply_devices(devices);
+            }
+            Ok(Err(error)) => {
+                self.device_refresh_result = None;
+                log::warn!(
+                    target: "companion::app",
+                    "device_refresh_failed provider={PROVIDER_LABEL} error_kind={}",
+                    provider_error_kind(&error)
+                );
+                self.connection_error = Some(error.user_message());
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                log::error!(
+                    target: "companion::app",
+                    "device_refresh_worker_failed provider={PROVIDER_LABEL} reason=channel_closed"
+                );
+                self.device_refresh_result = None;
+            }
+        }
+    }
+
     fn apply_connection_result(&mut self, result: ConnectionResult) {
         match result {
             Ok((client, devices)) => {
-                let provider = client.kind();
                 log::info!(
                     target: "companion::app",
-                    "connection_test_succeeded provider={} targets={}",
-                    provider.label(),
+                    "connection_test_succeeded provider={PROVIDER_LABEL} targets={}",
                     devices.len()
                 );
                 self.client = Some(Arc::new(client));
@@ -751,8 +760,7 @@ impl AppState {
             Err(error) => {
                 log::warn!(
                     target: "companion::app",
-                    "connection_test_failed provider={} error_kind={}",
-                    self.provider.label(),
+                    "connection_test_failed provider={PROVIDER_LABEL} error_kind={}",
                     provider_error_kind(&error)
                 );
                 self.apply_connection_error(error);
@@ -766,7 +774,7 @@ impl AppState {
         self.devices.clear();
         self.selected_device = None;
         self.credential_state = CredentialState::Invalid;
-        self.connection_error = Some(error.to_string());
+        self.connection_error = Some(error.user_message());
     }
     fn apply_devices(&mut self, devices: Vec<ProviderTarget>) {
         let selected = self
@@ -792,43 +800,27 @@ impl AppState {
         true
     }
 
-    fn start_test_action(&mut self, context: egui::Context, action: TestActionKind) {
+    fn start_test_action(&mut self, context: egui::Context) {
         let Some(client) = self.client.clone() else {
             log::warn!(target: "companion::app", "test_action_skipped outcome=skipped error_kind=not_connected");
             return;
         };
         let target = self.selected_device().cloned();
-        if !client
-            .kind()
-            .descriptor()
-            .target_policy
-            .accepts(target.is_some())
-        {
-            log::warn!(
-                target: "companion::app",
-                "test_action_skipped outcome=skipped provider={} target={:?} test_action={} error_kind=target_required",
-                client.kind().label(),
-                target.as_ref().map(ProviderTarget::id),
-                action.label()
-            );
-            return;
-        }
         log::info!(
             target: "companion::app",
-            "test_action_started outcome=started provider={} target={:?} test_action={}",
-            client.kind().label(),
-            target.as_ref().map(ProviderTarget::id),
-            action.label()
+            "test_action_started outcome=started provider={PROVIDER_LABEL} target={:?}",
+            target.as_ref().map(ProviderTarget::id)
         );
         let (sender, receiver) = mpsc::channel();
         self.test_action_status = Some(TestActionStatus::Sending);
         self.test_action_result = Some(receiver);
         thread::spawn(move || {
-            let result = client.test_action(action, target.as_ref());
+            let result = client.test_action(target.as_ref());
             let _ = sender.send(result);
             context.request_repaint();
         });
     }
+
 
     fn poll_test_action(&mut self) {
         let Some(receiver) = &self.test_action_result else {
@@ -872,23 +864,22 @@ impl AppState {
     }
     fn apply_test_action_error(&mut self, error: ProviderError) {
         self.test_action_status = Some(TestActionStatus::Failed(format!(
-            "Test sound failed: {error}"
+            "Test vibration failed: {}",
+            error.user_message()
         )));
     }
     fn copy_action_settings(&mut self, source: TriggerKind, destination: TriggerKind) -> bool {
         if source == destination {
             return false;
         }
-        let kind = self.provider.action_kind();
         let source_settings = self.triggers.get(source).actions.clone();
         self.triggers
             .get_mut(destination)
             .actions
-            .copy_active_from(&source_settings, kind);
+            .copy_active_from(&source_settings);
         self.copy_feedback = Some(format!(
-            "Copied {} {} settings to {}.",
+            "Copied {} {ACTION_KIND_LABEL} settings to {}.",
             source.label(),
-            kind.label(),
             destination.label()
         ));
         true
@@ -915,17 +906,14 @@ impl AppState {
                 Ok(completion) => {
                     self.action_in_flight = self.action_in_flight.saturating_sub(1);
                     let trigger = &completion.request.trigger;
-                    let action_kind = completion.request.resolved.kind().label();
                     let action_summary = completion.request.resolved.summary();
                     match completion.result {
                         ActionCompletionResult::Skipped { reason } => {
                             log::warn!(
                                 target: "companion::app",
-                                "action_skipped outcome=skipped error_kind=none trigger={} provider={} target={:?} action_kind={} action_summary={:?} session={} sequence={} reason={}",
+                                "action_skipped outcome=skipped error_kind=none trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason={}",
                                 trigger.kind.label(),
-                                completion.request.provider.label(),
                                 completion.request.target.as_ref().map(ProviderTarget::id),
-                                action_kind,
                                 action_summary,
                                 trigger.session_id,
                                 trigger.sequence,
@@ -939,11 +927,9 @@ impl AppState {
                         ActionCompletionResult::Completed(Ok(())) => {
                             log::info!(
                                 target: "companion::app",
-                                "action_sent outcome=sent error_kind=none trigger={} provider={} target={:?} action_kind={} action_summary={:?} session={} sequence={}",
+                                "action_sent outcome=sent error_kind=none trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={}",
                                 trigger.kind.label(),
-                                completion.request.provider.label(),
                                 completion.request.target.as_ref().map(ProviderTarget::id),
-                                action_kind,
                                 action_summary,
                                 trigger.session_id,
                                 trigger.sequence
@@ -953,11 +939,9 @@ impl AppState {
                         ActionCompletionResult::Completed(Err(error)) => {
                             log::warn!(
                                 target: "companion::app",
-                                "action_failed outcome=failed trigger={} provider={} target={:?} action_kind={} action_summary={:?} session={} sequence={} error_kind={}",
+                                "action_failed outcome=failed trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} error_kind={}",
                                 trigger.kind.label(),
-                                completion.request.provider.label(),
                                 completion.request.target.as_ref().map(ProviderTarget::id),
-                                action_kind,
                                 action_summary,
                                 trigger.session_id,
                                 trigger.sequence,
@@ -991,11 +975,9 @@ impl AppState {
         {
             log::debug!(
                 target: "companion::app",
-                "action_skipped outcome=skipped error_kind=duplicate_or_out_of_order trigger={} provider={} target={:?} action_kind={} session={} sequence={}",
+                "action_skipped outcome=skipped error_kind=duplicate_or_out_of_order trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} session={} sequence={}",
                 trigger.kind.label(),
-                self.provider.label(),
                 self.selected_device().map(ProviderTarget::id),
-                self.provider.action_kind().label(),
                 trigger.session_id,
                 trigger.sequence
             );
@@ -1013,11 +995,9 @@ impl AppState {
                 self.action_in_flight = self.action_in_flight.saturating_add(1);
                 log::info!(
                     target: "companion::app",
-                    "action_queued outcome=queued error_kind=none trigger={} provider={} target={:?} action_kind={} action_summary={:?} session={} sequence={}",
+                    "action_queued outcome=queued error_kind=none trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={}",
                     trigger.kind.label(),
-                    request.provider.label(),
                     request.target.as_ref().map(ProviderTarget::id),
-                    request.resolved.kind().label(),
                     request.resolved.summary(),
                     trigger.session_id,
                     trigger.sequence
@@ -1026,11 +1006,9 @@ impl AppState {
             ActionEnqueueResult::Full => {
                 log::warn!(
                     target: "companion::app",
-                    "action_skipped outcome=skipped error_kind=none trigger={} provider={} target={:?} action_kind={} action_summary={:?} session={} sequence={} reason=queue_capacity",
+                    "action_skipped outcome=skipped error_kind=none trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason=queue_capacity",
                     trigger.kind.label(),
-                    request.provider.label(),
                     request.target.as_ref().map(ProviderTarget::id),
-                    request.resolved.kind().label(),
                     request.resolved.summary(),
                     trigger.session_id,
                     trigger.sequence
@@ -1043,11 +1021,9 @@ impl AppState {
             ActionEnqueueResult::Disconnected => {
                 log::error!(
                     target: "companion::app",
-                    "action_failed outcome=failed trigger={} provider={} target={:?} action_kind={} action_summary={:?} session={} sequence={} reason=worker_unavailable error_kind=worker_unavailable",
+                    "action_failed outcome=failed trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason=worker_unavailable error_kind=worker_unavailable",
                     trigger.kind.label(),
-                    request.provider.label(),
                     request.target.as_ref().map(ProviderTarget::id),
-                    request.resolved.kind().label(),
                     request.resolved.summary(),
                     trigger.session_id,
                     trigger.sequence
@@ -1056,17 +1032,6 @@ impl AppState {
                     request,
                     error: "action worker is unavailable".to_owned(),
                 });
-            }
-        }
-    }
-    fn target_for_policy(
-        policy: crate::provider::TargetPolicy,
-        selected: Option<ProviderTarget>,
-    ) -> Option<ProviderTarget> {
-        match policy {
-            crate::provider::TargetPolicy::None => None,
-            crate::provider::TargetPolicy::Required | crate::provider::TargetPolicy::Optional => {
-                selected
             }
         }
     }
@@ -1105,27 +1070,21 @@ impl AppState {
             return;
         }
 
-        let provider = self.provider;
-        let target_policy = provider.descriptor().target_policy;
-        let target = Self::target_for_policy(target_policy, self.selected_device().cloned());
-        let action_result = settings.actions.resolve(provider.action_kind());
-        let resolved = match action_result {
+        let target = self.selected_device().cloned();
+        let resolved = match settings.actions.resolve_checked() {
             Ok(resolved) => resolved,
             Err(error) => {
                 log::warn!(
                     target: "companion::app",
-                    "action_skipped outcome=skipped trigger={} provider={} target={:?} action_kind={} session={} sequence={} reason=invalid_settings error_kind=invalid_settings validation={}",
+                    "action_skipped outcome=skipped trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} session={} sequence={} reason=invalid_settings error_kind=invalid_settings validation={}",
                     trigger.kind.label(),
-                    provider.label(),
                     target.as_ref().map(ProviderTarget::id),
-                    provider.action_kind().label(),
                     trigger.session_id,
                     trigger.sequence,
                     error
                 );
                 self.action_status = Some(ActionStatus::Skipped {
                     snapshot: ActionSnapshot {
-                        provider,
                         target,
                         resolved: None,
                         trigger,
@@ -1135,29 +1094,7 @@ impl AppState {
                 return;
             }
         };
-        if !target_policy.accepts(target.is_some()) {
-            log::warn!(
-                target: "companion::app",
-                "action_skipped outcome=skipped trigger={} provider={} target=none action_kind={} session={} sequence={} reason=target_required error_kind=target_required",
-                trigger.kind.label(),
-                provider.label(),
-                resolved.kind().label(),
-                trigger.session_id,
-                trigger.sequence
-            );
-            self.action_status = Some(ActionStatus::Skipped {
-                snapshot: ActionSnapshot {
-                    provider,
-                    target,
-                    resolved: Some(resolved),
-                    trigger,
-                },
-                reason: "no target is selected".to_owned(),
-            });
-            return;
-        }
         let request = ActionRequest {
-            provider,
             target,
             resolved,
             trigger,
@@ -1166,11 +1103,9 @@ impl AppState {
         let Some(client) = self.client.clone() else {
             log::warn!(
                 target: "companion::app",
-                "action_skipped outcome=skipped trigger={} provider={} target={:?} action_kind={} action_summary={:?} session={} sequence={} reason=provider_not_connected error_kind=not_connected",
+                "action_skipped outcome=skipped trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason=provider_not_connected error_kind=not_connected",
                 request.trigger.kind.label(),
-                request.provider.label(),
                 request.target.as_ref().map(ProviderTarget::id),
-                request.resolved.kind().label(),
                 request.resolved.summary(),
                 request.trigger.session_id,
                 request.trigger.sequence
@@ -1467,26 +1402,60 @@ impl AppState {
     pub fn draw(&mut self, ui: &mut Ui) {
         self.poll_test_action();
         self.poll_connection_test();
+        self.poll_device_refresh();
         self.poll_action();
         self.poll_bridge_events();
         let busy = self.is_busy();
 
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             for section in [
                 AppSection::Setup,
                 AppSection::Effects,
                 AppSection::GameConnection,
+                AppSection::Donate,
             ] {
-                ui.selectable_value(&mut self.selected_section, section, section.label());
+                let selected = self.selected_section == section;
+                ui.vertical(|ui| {
+                    let wing_top = ui.cursor().top();
+                    ui.add_space(8.0);
+                    let button = egui::Button::new(crate::theme::heading_text(section.label(), 16.0))
+                        .fill(if selected {
+                            crate::theme::ACCENT_DIM
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .stroke(if selected {
+                            egui::Stroke::new(1.0, crate::theme::ACCENT)
+                        } else {
+                            egui::Stroke::NONE
+                        });
+                    let response = ui.add(button);
+                    if selected {
+                        let center_x = response.rect.center().x;
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            vec![
+                                egui::pos2(center_x, wing_top),
+                                egui::pos2(center_x - 7.0, wing_top + 8.0),
+                                egui::pos2(center_x + 7.0, wing_top + 8.0),
+                            ],
+                            crate::theme::ACCENT,
+                            egui::Stroke::NONE,
+                        ));
+                    }
+                    if response.clicked() {
+                        self.selected_section = section;
+                    }
+                });
+                ui.add_space(6.0);
             }
         });
-        ui.separator();
-        ui.add_space(6.0);
+        ui.add_space(10.0);
 
         match self.selected_section {
             AppSection::Setup => self.draw_setup(ui, busy),
             AppSection::Effects => self.draw_effects(ui, busy),
             AppSection::GameConnection => self.draw_game_connection(ui),
+            AppSection::Donate => Self::draw_donate(ui),
         }
 
         let listener_status = self.bridge_listener.status();
@@ -1496,159 +1465,205 @@ impl AppState {
     }
 
     fn draw_setup(&mut self, ui: &mut Ui, busy: bool) {
-        let descriptor = self.provider.descriptor();
-        ui.heading("Provider");
-        let mut provider = self.provider;
-        ui.add_enabled_ui(!busy, |ui| {
-            egui::ComboBox::from_id_salt("provider")
-                .selected_text(provider.label())
-                .show_ui(ui, |ui| {
-                    for candidate in crate::provider::SUPPORTED_PROVIDERS {
-                        ui.selectable_value(&mut provider, candidate, candidate.label());
-                    }
-                });
-        });
-        if provider != self.provider {
-            self.set_provider(provider);
-        }
+        self.draw_connection_card(ui, busy);
+        ui.add_space(10.0);
+        self.draw_toy_card(ui, busy);
+    }
 
-        ui.add_space(8.0);
-        ui.heading(descriptor.setup_label);
-        let mut credentials_changed = false;
-        ui.add_enabled_ui(!busy, |ui| match self.provider {
-            ProviderKind::PiShock => {
-                credentials_changed |= text_input(
+    fn draw_connection_card(&mut self, ui: &mut Ui, busy: bool) {
+        crate::theme::card(ui).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                crate::theme::colored_text_nudged_down(
                     ui,
-                    "API key",
-                    &mut self.provider_settings.pishock.api_key,
-                    true,
+                    egui_phosphor::regular::HEART,
+                    crate::theme::ACCENT,
+                    4.0,
                 );
-                credentials_changed |= text_input(
-                    ui,
-                    "Username",
-                    &mut self.provider_settings.pishock.username,
-                    false,
-                );
+                ui.label(crate::theme::heading_text("Lovense connection", 19.0));
+            });
+            ui.add_space(4.0);
+            ui.label(
+                "This connects the companion to the Lovense Remote app on your PC, which talks to your toy. Most people won't need to change any settings here.",
+            );
+            ui.add_space(14.0);
+
+            ui.label(egui::RichText::new("1. Open the Lovense Remote app").strong());
+            ui.small("Make sure your toy already shows as connected in it.");
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("2. Turn on Game Mode").strong());
+            ui.small(
+                "Find it in the Remote app's menu. This lets other apps, like this one, send vibration commands to your toy.",
+            );
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("3. Test the connection").strong());
+            ui.small("Click the button below \u{2014} you're done once it says \u{201c}Connected\u{201d}.");
+            ui.add_space(14.0);
+
+            let can_test = self.credentials_present() && !busy;
+            if ui
+                .add_enabled(
+                    can_test,
+                    egui::Button::new(egui::RichText::new("Test connection").size(15.0))
+                        .min_size(egui::vec2(ui.available_width(), 34.0)),
+                )
+                .clicked()
+            {
+                self.start_connection_test(ui.ctx().clone());
             }
-            ProviderKind::OpenShock => {
-                credentials_changed |= text_input(
-                    ui,
-                    "OpenShock token",
-                    &mut self.provider_settings.openshock.token,
-                    true,
-                );
-                ui.label(descriptor.setup_help);
-                ui.hyperlink_to(
-                    "OpenShock token settings",
-                    "https://next.openshock.app/settings/api-tokens",
-                );
-            }
-            ProviderKind::Lovense => {
-                credentials_changed |= text_input(
-                    ui,
-                    "Domain",
-                    &mut self.provider_settings.lovense.domain,
-                    false,
-                );
-                ui.horizontal(|ui| {
-                    ui.label("HTTP port");
-                    credentials_changed |= ui
-                        .add(egui::DragValue::new(
-                            &mut self.provider_settings.lovense.http_port,
-                        ))
-                        .changed();
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                crate::theme::badge(ui, self.credential_state.label(), self.credential_state.tone());
+                if let Some(error) = &self.connection_error {
+                    crate::theme::badge(ui, error, crate::theme::BadgeTone::Danger);
+                }
+            });
+
+            ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(8.0);
+            let mut credentials_changed = false;
+            egui::CollapsingHeader::new("Advanced: custom domain / port")
+                .id_salt("lovense-advanced")
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.small(
+                        "Only needed if your toy connects through Lovense Remote on your phone instead of this PC. The app's Game Mode screen shows the domain and port to enter here.",
+                    );
+                    ui.add_space(8.0);
+                    ui.add_enabled_ui(!busy, |ui| {
+                        credentials_changed |= text_input(
+                            ui,
+                            "Domain",
+                            &mut self.provider_settings.lovense.domain,
+                            false,
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label("HTTP port");
+                            credentials_changed |= ui
+                                .add(egui::DragValue::new(
+                                    &mut self.provider_settings.lovense.http_port,
+                                ))
+                                .changed();
+                        });
+                    });
                 });
-                ui.label(descriptor.setup_help);
+            if credentials_changed {
+                self.reset_connection();
             }
         });
-        if credentials_changed {
-            self.reset_connection();
-        }
-        let can_test = self.credentials_present() && !busy;
-        if ui
-            .add_enabled(
-                can_test,
-                egui::Button::new("Test connection").min_size([ui.available_width(), 0.0].into()),
-            )
-            .clicked()
-        {
-            self.start_connection_test(ui.ctx().clone());
-        }
-        status_line(
-            ui,
-            self.credential_state.label(),
-            self.credential_state.color(),
-        );
-        if let Some(error) = &self.connection_error {
-            status_line(ui, error, CredentialState::Invalid.color());
-        }
+    }
 
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-        if descriptor.target_policy != crate::provider::TargetPolicy::None {
-            ui.heading(descriptor.target_noun);
+    fn draw_toy_card(&mut self, ui: &mut Ui, busy: bool) {
+        crate::theme::card(ui).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                crate::theme::colored_text_nudged_down(
+                    ui,
+                    egui_phosphor::regular::VIBRATE,
+                    crate::theme::ACCENT,
+                    4.0,
+                );
+                ui.label(crate::theme::heading_text("Toy", 19.0));
+            });
+            ui.add_space(4.0);
+            ui.label("Pick which toy reacts to in-game events, once connected above.");
+            ui.add_space(10.0);
             let selection_enabled = !self.devices.is_empty() && !busy;
             let selected_name = self
                 .selected_device()
                 .map(|device| device.name().to_owned())
                 .unwrap_or_else(|| {
                     if self.devices.is_empty() {
-                        format!("No {}s found", descriptor.target_noun.to_lowercase())
+                        "No toys found yet".to_owned()
                     } else {
-                        format!("Select a {}", descriptor.target_noun.to_lowercase())
+                        "All connected toys".to_owned()
                     }
                 });
             let mut selection_changed = false;
             let mut selected_device = self.selected_device.clone();
-            ui.add_enabled_ui(selection_enabled, |ui| {
-                egui::ComboBox::from_id_salt("device")
-                    .selected_text(selected_name.as_str())
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for device in &self.devices {
-                            selection_changed |= ui
-                                .selectable_value(
-                                    &mut selected_device,
-                                    Some(device.id().clone()),
-                                    device.name(),
-                                )
-                                .changed();
-                        }
-                    });
+            ui.horizontal(|ui| {
+                let can_refresh = self.client.is_some() && !busy;
+                let refresh_width = 34.0;
+                let spacing = ui.spacing().item_spacing.x;
+                ui.add_enabled_ui(selection_enabled, |ui| {
+                    egui::ComboBox::from_id_salt("device")
+                        .selected_text(selected_name.as_str())
+                        .width(ui.available_width() - refresh_width - spacing)
+                        .show_ui(ui, |ui| {
+                            for device in &self.devices {
+                                selection_changed |= ui
+                                    .selectable_value(
+                                        &mut selected_device,
+                                        Some(device.id().clone()),
+                                        device.name(),
+                                    )
+                                    .changed();
+                            }
+                        });
+                });
+                if ui
+                    .add_enabled(
+                        can_refresh,
+                        egui::Button::new(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                            .min_size(egui::vec2(refresh_width, 0.0)),
+                    )
+                    .on_hover_text("Refresh the toy list")
+                    .clicked()
+                {
+                    self.start_device_refresh(ui.ctx().clone());
+                }
             });
             if selection_changed && let Some(target) = selected_device {
                 self.select_device(target);
             }
-        }
-        let target_present = descriptor.target_policy != crate::provider::TargetPolicy::None
-            && self.selected_device.is_some();
-        let can_test =
-            descriptor.target_policy.accepts(target_present) && self.client.is_some() && !busy;
-        if let Some(test_action) = descriptor.test_action
-            && ui
+            ui.add_space(4.0);
+            if self.devices.is_empty() {
+                ui.small("Just connected your toy? Click the refresh button above \u{2014} the list only updates when asked.");
+            } else {
+                ui.small("Leave it on \u{201c}All connected toys\u{201d} unless you specifically want just one to react.");
+            }
+            if self.devices.is_empty() {
+                if let Some(error) = &self.connection_error {
+                    ui.add_space(4.0);
+                    crate::theme::badge(ui, error, crate::theme::BadgeTone::Danger);
+                } else {
+                    ui.add_space(4.0);
+                    ui.small("Still nothing after refreshing? Double-check \u{201c}Game Mode\u{201d} is toggled on in the Lovense Remote app. A toy can show connected there without being visible to Game Mode.");
+                }
+            }
+            ui.add_space(10.0);
+            let can_test = self.client.is_some() && !busy;
+            if ui
                 .add_enabled(
                     can_test,
-                    egui::Button::new(test_action.label())
-                        .min_size([ui.available_width(), 0.0].into()),
+                    egui::Button::new(egui::RichText::new("Send test vibration").size(15.0))
+                        .min_size(egui::vec2(ui.available_width(), 34.0)),
                 )
                 .clicked()
-        {
-            self.start_test_action(ui.ctx().clone(), test_action);
-        }
-        if let Some(status) = &self.test_action_status {
-            status_line(ui, status.label(), status.color());
-        }
+            {
+                self.start_test_action(ui.ctx().clone());
+            }
+            if let Some(status) = &self.test_action_status {
+                ui.add_space(8.0);
+                crate::theme::badge(ui, status.label(), status.tone());
+            }
+        });
     }
 
     fn draw_effects(&mut self, ui: &mut Ui, busy: bool) {
-        let action_kind = self.provider.action_kind();
-        ui.heading("Effects");
-        ui.label(format!(
-            "Each trigger has its own {} settings.",
-            action_kind.label()
+        ui.columns(2, |columns| {
+            self.draw_trigger_list(&mut columns[0], busy);
+            self.draw_effect_editor(&mut columns[1], busy);
+        });
+    }
+
+    fn draw_trigger_list(&mut self, ui: &mut Ui, busy: bool) {
+        ui.label(crate::theme::heading_text("Triggers", 26.0));
+        crate::theme::flourish(ui);
+        ui.small(format!(
+            "Each trigger has its own {ACTION_KIND_LABEL} settings."
         ));
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         for kind in [
             TriggerKind::Death,
             TriggerKind::Kill,
@@ -1656,99 +1671,172 @@ impl AppState {
             TriggerKind::AbilityUse,
             TriggerKind::AbilityCooldownReady,
         ] {
-            let summary = self.triggers.get(kind).actions.summary(action_kind);
+            let summary = self.triggers.get(kind).actions.summary();
+            let enabled = self.triggers.get(kind).enabled;
             let selected = self.selected_effect == kind;
-            let frame = egui::Frame::group(ui.style()).inner_margin(8.0);
             let frame = if selected {
-                frame
-                    .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.35))
-                    .stroke(ui.visuals().selection.stroke)
+                crate::theme::card_selected(ui)
             } else {
-                frame
+                crate::theme::card(ui)
             };
             let mut configure_clicked = false;
-            frame.show(ui, |ui| {
+            let mut controls_rect = egui::Rect::NOTHING;
+            let card = frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.strong(trigger_display_label(kind));
-                        ui.small(summary.clone());
-                    });
+                    crate::theme::icon_badge(ui, trigger_icon(kind), enabled);
+                    // Add controls right-to-left first so the text vertical gets
+                    // only the space between the icon and the controls, not the
+                    // full remaining card width.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         configure_clicked |= ui.button("Configure").clicked();
                         ui.add_enabled_ui(!busy, |ui| {
                             toggle_button(ui, &mut self.triggers.get_mut(kind).enabled);
                         });
+                        // Capture the controls-only rect before adding the text block.
+                        controls_rect = ui.min_rect();
+                        // Text fills the remaining space to the left of the controls.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(crate::theme::heading_text(trigger_display_label(kind), 18.0));
+                                if enabled {
+                                    ui.colored_label(
+                                        crate::theme::ACCENT_BRIGHT,
+                                        format!("{} mode", self.triggers.get(kind).actions.mode.label()),
+                                    );
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(crate::theme::ACCENT, egui_phosphor::regular::HEART);
+                                    ui.small(summary.clone());
+                                });
+                            });
+                        });
                     });
                 });
             });
+            // The toggle/Configure controls sit inside the card, so the
+            // whole-card click sense below is restricted to the area left of
+            // them. Otherwise it sits on top in interaction order and
+            // swallows clicks meant for the toggle button.
+            let mut click_rect = card.response.rect;
+            if controls_rect.is_positive() {
+                click_rect.max.x = controls_rect.min.x;
+            }
+            let card_id = ui.id().with(("trigger_card", trigger_display_label(kind)));
+            let card_response = ui.interact(click_rect, card_id, egui::Sense::click());
+            if card_response.clicked() {
+                configure_clicked = true;
+            }
+            if card_response.hovered() {
+                ui.ctx()
+                    .set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             if configure_clicked {
                 self.select_effect(kind);
             }
-            ui.add_space(4.0);
+            ui.add_space(6.0);
         }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-        let destination = self.selected_effect;
-        ui.heading(format!("{} effect", trigger_display_label(destination)));
-        ui.add_enabled_ui(!busy, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Trigger");
-                toggle_button(ui, &mut self.triggers.get_mut(destination).enabled);
-            });
-        });
-        if matches!(
-            destination,
-            TriggerKind::AbilityUse | TriggerKind::AbilityCooldownReady
-        ) {
-            self.draw_ability_filter(ui, destination, busy);
-            if destination == TriggerKind::AbilityCooldownReady {
-                ui.small("Cooldown ready includes a normal cooldown finishing and a charged ability restoring a charge.");
-            }
-        }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(format!("Copy {} settings from", action_kind.label()));
-            ui.add_enabled_ui(!busy, |ui| {
-                egui::ComboBox::from_id_salt("copy-action-source")
-                    .selected_text(trigger_display_label(self.copy_source))
-                    .show_ui(ui, |ui| {
-                        for source in [
-                            TriggerKind::Death,
-                            TriggerKind::Kill,
-                            TriggerKind::Assist,
-                            TriggerKind::AbilityUse,
-                            TriggerKind::AbilityCooldownReady,
-                        ] {
-                            if source != destination {
-                                ui.selectable_value(
-                                    &mut self.copy_source,
-                                    source,
-                                    trigger_display_label(source),
-                                );
-                            }
-                        }
-                    });
-            });
-        });
-        if ui
-            .add_enabled(
-                !busy && self.copy_source != destination,
-                egui::Button::new("Copy").min_size([ui.available_width(), 0.0].into()),
-            )
-            .clicked()
-        {
-            self.copy_action_settings(self.copy_source, destination);
-        }
-        if let Some(feedback) = &self.copy_feedback {
-            status_line(ui, feedback, [0.30, 0.78, 0.42, 1.0]);
-        }
-        ui.add_space(6.0);
-        ui.add_enabled_ui(!busy, |ui| {
-            let trigger = self.triggers.get_mut(destination);
-            crate::action_ui::draw_action_editor(ui, action_kind, &mut trigger.actions);
-        });
+        ui.add_space(4.0);
+        crate::theme::flourish(ui);
     }
+
+    /// Reserves the same vertical space as the trigger list's heading +
+    /// flourish + caption (drawn transparently, so its height matches
+    /// exactly rather than being guessed), so the effect editor's card
+    /// starts level with the first trigger card next to it.
+    fn draw_effect_editor_header_spacer(ui: &mut Ui) {
+        ui.scope(|ui| {
+            ui.visuals_mut().override_text_color = Some(egui::Color32::TRANSPARENT);
+            ui.label(crate::theme::heading_text("Triggers", 26.0));
+        });
+        ui.add_space(14.0); // matches theme::flourish's fixed height
+        ui.scope(|ui| {
+            ui.visuals_mut().override_text_color = Some(egui::Color32::TRANSPARENT);
+            ui.small("spacer");
+        });
+        ui.add_space(6.0);
+    }
+
+    fn draw_effect_editor(&mut self, ui: &mut Ui, busy: bool) {
+        let destination = self.selected_effect;
+        Self::draw_effect_editor_header_spacer(ui);
+        crate::theme::card(ui).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                crate::theme::icon_badge_sized(ui, trigger_icon(destination), true, 56.0);
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.label(crate::theme::heading_text(
+                        format!("{} effect", trigger_display_label(destination)),
+                        22.0,
+                    ));
+                    ui.add_enabled_ui(!busy, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.add_space(3.0);
+                                ui.label(crate::theme::heading_text("Trigger", 16.0));
+                            });
+                            toggle_button(ui, &mut self.triggers.get_mut(destination).enabled);
+                        });
+                    });
+                });
+            });
+            if matches!(
+                destination,
+                TriggerKind::AbilityUse | TriggerKind::AbilityCooldownReady
+            ) {
+                self.draw_ability_filter(ui, destination, busy);
+                if destination == TriggerKind::AbilityCooldownReady {
+                    ui.small("Cooldown ready includes a normal cooldown finishing and a charged ability restoring a charge.");
+                }
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                crate::theme::label_nudged_down(
+                    ui,
+                    &format!("Copy {ACTION_KIND_LABEL} settings from"),
+                    8.0,
+                );
+                ui.add_enabled_ui(!busy, |ui| {
+                    egui::ComboBox::from_id_salt("copy-action-source")
+                        .selected_text(trigger_display_label(self.copy_source))
+                        .show_ui(ui, |ui| {
+                            for source in [
+                                TriggerKind::Death,
+                                TriggerKind::Kill,
+                                TriggerKind::Assist,
+                                TriggerKind::AbilityUse,
+                                TriggerKind::AbilityCooldownReady,
+                            ] {
+                                if source != destination {
+                                    ui.selectable_value(
+                                        &mut self.copy_source,
+                                        source,
+                                        trigger_display_label(source),
+                                    );
+                                }
+                            }
+                        });
+                });
+                ui.add_enabled_ui(!busy && self.copy_source != destination, |ui| {
+                    let label = format!("{} Copy", egui_phosphor::regular::HEART);
+                    if ui.button(label).clicked() {
+                        self.copy_action_settings(self.copy_source, destination);
+                    }
+                });
+            });
+            if let Some(feedback) = &self.copy_feedback {
+                status_line(ui, feedback, [0.30, 0.78, 0.42, 1.0]);
+            }
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.add_enabled_ui(!busy, |ui| {
+                let trigger = self.triggers.get_mut(destination);
+                crate::action_ui::draw_vibrate_settings_editor(ui, &mut trigger.actions);
+            });
+        });
+
+    }
+
     fn draw_ability_filter(&mut self, ui: &mut Ui, kind: TriggerKind, busy: bool) {
         let mut slots: BTreeSet<u32> = (1..=4).collect();
         slots.extend(self.ability_catalog.keys().copied());
@@ -1776,7 +1864,7 @@ impl AppState {
                     let label = names
                         .get(slot)
                         .and_then(Option::as_deref)
-                        .map(|name| format!("Slot {slot} — {name}"))
+                        .map(|name| format!("Slot {slot}: {name}"))
                         .unwrap_or_else(|| format!("Slot {slot}"));
                     if ui.checkbox(&mut selected, label).changed() {
                         if matches!(&*filter, AbilityFilter::All) {
@@ -1809,47 +1897,113 @@ impl AppState {
         }
     }
 
+    fn draw_donate(ui: &mut Ui) {
+        crate::theme::card(ui).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(6.0);
+                ui.colored_label(
+                    crate::theme::ACCENT,
+                    egui::RichText::new(egui_phosphor::regular::HEART).size(40.0),
+                );
+                ui.add_space(6.0);
+                ui.label(crate::theme::heading_text("Enjoying Lovelock Companion?", 24.0));
+                ui.small("If it's brought a little extra fun to your matches, consider supporting development on Ko-fi.");
+                ui.add_space(12.0);
+                let button = egui::Button::new(
+                    egui::RichText::new(format!(
+                        "{} Support on Ko-fi",
+                        egui_phosphor::regular::HEART
+                    ))
+                    .strong(),
+                )
+                .fill(crate::theme::ACCENT);
+                if ui.add(button).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(KOFI_URL));
+                }
+                ui.add_space(6.0);
+                ui.hyperlink_to(KOFI_URL, KOFI_URL);
+            });
+        });
+
+        ui.add_space(10.0);
+
+        crate::theme::card(ui).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(6.0);
+                ui.colored_label(
+                    crate::theme::ACCENT,
+                    egui::RichText::new(egui_phosphor::regular::SPARKLE).size(28.0),
+                );
+                ui.add_space(6.0);
+                ui.label(crate::theme::heading_text("Shoutout to volc", 20.0));
+                ui.small("The original creator of DeadlockShock, which this companion is built on. Go check them out!");
+                ui.add_space(10.0);
+                let button = egui::Button::new(
+                    egui::RichText::new(format!(
+                        "{} Visit volc on GameBanana",
+                        egui_phosphor::regular::SPARKLE
+                    ))
+                    .strong(),
+                )
+                .fill(crate::theme::ACCENT);
+                if ui.add(button).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(VOLC_PROFILE_URL));
+                }
+                ui.add_space(6.0);
+                ui.hyperlink_to(VOLC_PROFILE_URL, VOLC_PROFILE_URL);
+            });
+        });
+    }
+
     fn draw_game_connection(&mut self, ui: &mut Ui) {
-        ui.heading("Game connection");
-        ui.label("Deadlock must be launched with -condebug so it writes console.log.");
-        text_input(ui, "Log path", &mut self.log_path, false);
-        ui.horizontal(|ui| {
-            let spacing = ui.spacing().item_spacing.x;
-            let button_size = egui::vec2(
-                (ui.available_width() - spacing) * 0.5,
-                ui.spacing().interact_size.y,
-            );
-            if ui
-                .add_sized(button_size, egui::Button::new("Auto-detect"))
-                .clicked()
-            {
-                self.auto_detect_log_path();
+        crate::theme::card(ui).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(crate::theme::ACCENT, egui_phosphor::regular::PLUGS_CONNECTED);
+                ui.label(crate::theme::heading_text("Game connection", 19.0));
+            });
+            ui.small("Deadlock must be launched with -condebug so it writes console.log.");
+            ui.add_space(4.0);
+            text_input(ui, "Log path", &mut self.log_path, false);
+            ui.horizontal(|ui| {
+                let spacing = ui.spacing().item_spacing.x;
+                let button_size = egui::vec2(
+                    (ui.available_width() - spacing) * 0.5,
+                    ui.spacing().interact_size.y,
+                );
+                if ui
+                    .add_sized(button_size, egui::Button::new("Auto-detect"))
+                    .clicked()
+                {
+                    self.auto_detect_log_path();
+                }
+                if ui
+                    .add_sized(button_size, egui::Button::new("Start/Restart listener"))
+                    .clicked()
+                {
+                    self.start_listener_from_input();
+                }
+            });
+            if let Some(status) = &self.log_detection_status {
+                ui.add_space(4.0);
+                crate::theme::badge(ui, status.label(), status.tone());
             }
-            if ui
-                .add_sized(button_size, egui::Button::new("Start/Restart listener"))
-                .clicked()
-            {
-                self.start_listener_from_input();
+            if let Some(error) = &self.listener_action_error {
+                status_line(ui, error, [0.92, 0.32, 0.28, 1.0]);
+            }
+            ui.add_space(6.0);
+            let listener_status = self.bridge_listener.status();
+            draw_listener_status(ui, &listener_status, self.last_bridge_event.as_ref());
+            ui.label(format!(
+                "Current ability catalogue: {} slot(s).",
+                self.ability_catalog.len()
+            ));
+            if let Some(status) = &self.action_status {
+                let label = status.label();
+                status_line(ui, &label, status.color());
+            } else {
+                ui.label("Last action delivery: none since startup.");
             }
         });
-        if let Some(status) = &self.log_detection_status {
-            status_line(ui, status.label(), status.color());
-        }
-        if let Some(error) = &self.listener_action_error {
-            status_line(ui, error, [0.92, 0.32, 0.28, 1.0]);
-        }
-        let listener_status = self.bridge_listener.status();
-        draw_listener_status(ui, &listener_status, self.last_bridge_event.as_ref());
-        ui.label(format!(
-            "Current ability catalogue: {} slot(s).",
-            self.ability_catalog.len()
-        ));
-        if let Some(status) = &self.action_status {
-            let label = status.label();
-            status_line(ui, &label, status.color());
-        } else {
-            ui.label("Last action delivery: none since startup.");
-        }
     }
 }
 
@@ -1864,6 +2018,8 @@ pub struct CompanionApp {
     logs_window_open: bool,
     logs_cached_revision: u64,
     logs_cached_text: String,
+    logo_texture: Option<egui::TextureHandle>,
+    credits_window_open: bool,
 }
 
 impl CompanionApp {
@@ -1891,6 +2047,14 @@ impl CompanionApp {
     pub fn load_with_context(context: egui::Context, log_store: LogStore) -> Self {
         let mut app = Self::load_with_store(log_store);
         app.version_check = VersionCheckOwner::new(&context);
+        // The Lovense connection itself is never persisted (only the setup
+        // that reaches it is), so without this the toy has to be manually
+        // reconnected every time the app is opened, even though everything
+        // needed to do so automatically is already saved.
+        if app.state.credentials_present() {
+            log::info!(target: "companion::app", "startup_connection_attempt provider={PROVIDER_LABEL}");
+            app.state.start_connection_test(context);
+        }
         app
     }
 
@@ -1939,6 +2103,8 @@ impl CompanionApp {
             logs_window_open: false,
             logs_cached_revision: 0,
             logs_cached_text: String::new(),
+            logo_texture: None,
+            credits_window_open: false,
         }
     }
 
@@ -1953,34 +2119,151 @@ impl CompanionApp {
         self.version_warnings =
             select_warnings(&app_version(), &listener_status.mod_version, remote);
 
-        self.draw_menu(ui);
-        if let Some(warning) = self.persistence.load_warning() {
-            status_line(ui, warning, [0.92, 0.68, 0.22, 1.0]);
+        draw_resize_borders(ui.ctx());
+        self.draw_title_bar(ui);
+
+        if self.persistence.load_warning().is_some()
+            || self.persistence.save_error().is_some()
+            || self.menu_error.is_some()
+            || self.has_update_warning()
+        {
+            egui::Panel::top("notices")
+                .frame(egui::Frame::NONE.fill(crate::theme::BASE).inner_margin(8.0))
+                .show(ui, |ui| {
+                    if let Some(warning) = self.persistence.load_warning() {
+                        status_line(ui, warning, [0.92, 0.68, 0.22, 1.0]);
+                    }
+                    if let Some(error) = self.persistence.save_error() {
+                        status_line(ui, error, [0.92, 0.32, 0.28, 1.0]);
+                    }
+                    if let Some(error) = &self.menu_error {
+                        status_line(ui, error, [0.92, 0.32, 0.28, 1.0]);
+                    }
+                    self.draw_update_panel(ui);
+                });
         }
-        if let Some(error) = self.persistence.save_error() {
-            status_line(ui, error, [0.92, 0.32, 0.28, 1.0]);
-        }
-        if let Some(error) = &self.menu_error {
-            status_line(ui, error, [0.92, 0.32, 0.28, 1.0]);
-        }
-        self.draw_update_panel(ui);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Frame::NONE.inner_margin(8.0).show(ui, |ui| {
-                self.state.draw(ui);
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(crate::theme::BASE))
+            .show(ui, |ui| {
+                crate::theme::paint_dotted_background(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Frame::NONE.inner_margin(16.0).show(ui, |ui| {
+                        self.state.draw(ui);
+                    });
+                });
             });
-        });
-        self.draw_reset_confirmation(ui);
-        self.draw_logs_window(ui.ctx());
+        let ctx = ui.ctx().clone();
+        self.draw_reset_confirmation(&ctx);
+        self.draw_logs_window(&ctx);
+        self.draw_credits_window(&ctx);
 
         if let Some(delay) = self
             .persistence
             .observe(PersistedState::from_app(&self.state), Instant::now())
         {
-            ui.ctx().request_repaint_after(delay);
+            ctx.request_repaint_after(delay);
         }
         if self.version_check.is_checking() {
-            ui.ctx().request_repaint_after(Duration::from_millis(250));
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+
+    fn has_update_warning(&self) -> bool {
+        self.version_warnings.companion_outdated.is_some()
+            || self.version_warnings.mod_outdated.is_some()
+            || self.version_warnings.mod_legacy
+            || self.version_warnings.mod_invalid
+    }
+
+    fn draw_title_bar(&mut self, ui: &mut Ui) {
+        let bar_height = 44.0;
+        egui::Panel::top("title_bar")
+            .exact_size(bar_height)
+            .frame(
+                egui::Frame::NONE
+                    .fill(crate::theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
+            )
+            .show(ui, |ui| {
+                let ctx = ui.ctx().clone();
+                ui.horizontal_centered(|ui| {
+                    let drag_response = ui.interact(
+                        ui.max_rect(),
+                        ui.id().with("title_bar_drag"),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if drag_response.drag_started() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    if drag_response.double_clicked() {
+                        let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                    }
+
+                    if self.logo_texture.is_none() {
+                        let image = image::load_from_memory_with_format(
+                            include_bytes!("../assets/logo.png"),
+                            image::ImageFormat::Png,
+                        )
+                        .expect("logo.png must be a valid PNG")
+                        .into_rgba8();
+                        let size = [image.width() as usize, image.height() as usize];
+                        self.logo_texture = Some(ui.ctx().load_texture(
+                            "lovelock-logo",
+                            egui::ColorImage::from_rgba_unmultiplied(size, &image.into_raw()),
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                    if let Some(logo) = &self.logo_texture {
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::from_handle(logo))
+                                .fit_to_exact_size(egui::vec2(28.0, 28.0)),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.label(crate::theme::heading_text("Lovelock Companion", 20.0));
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(egui_phosphor::regular::X).frame(false))
+                            .clicked()
+                        {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        if ui
+                            .add(egui::Button::new(egui_phosphor::regular::SQUARE).frame(false))
+                            .clicked()
+                        {
+                            let maximized =
+                                ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                        }
+                        if ui
+                            .add(egui::Button::new(egui_phosphor::regular::MINUS).frame(false))
+                            .clicked()
+                        {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                        ui.add_space(10.0);
+                        let gear_response = ui.add(
+                            egui::Button::new(egui_phosphor::regular::GEAR)
+                                .corner_radius(egui::CornerRadius::same(255))
+                                .stroke(egui::Stroke::new(1.0, crate::theme::STROKE)),
+                        );
+                        egui::Popup::menu(&gear_response).show(|ui| {
+                            ui.set_min_width(220.0);
+                            self.draw_menu_contents(ui);
+                        });
+                        ui.add_space(10.0);
+                        crate::theme::badge(
+                            ui,
+                            &format!("v{}", app_version()),
+                            crate::theme::BadgeTone::Success,
+                        );
+                    });
+                });
+            });
     }
     fn draw_logs_window(&mut self, ctx: &egui::Context) {
         if !self.logs_window_open {
@@ -2014,6 +2297,37 @@ impl CompanionApp {
                 });
         });
         self.logs_window_open = open;
+    }
+
+    fn draw_credits_window(&mut self, ctx: &egui::Context) {
+        if !self.credits_window_open {
+            return;
+        }
+
+        let mut open = true;
+        egui::Window::new("Credits")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(4.0);
+                    ui.colored_label(
+                        crate::theme::ACCENT,
+                        egui::RichText::new(egui_phosphor::regular::HEART).size(32.0),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(crate::theme::heading_text("volc", 18.0));
+                    ui.label(
+                        "A HUGE THANK YOU to volc for DeadlockShock, the mod this companion is built on.",
+                    );
+                    ui.add_space(12.0);
+                    ui.label(crate::theme::heading_text("KaufkinNova", 18.0));
+                    ui.label("A HUGE THANK YOU to KaufkinNova for the idea and for sponsoring this mod.");
+                    ui.add_space(4.0);
+                });
+            });
+        self.credits_window_open = open;
     }
 
     fn draw_update_panel(&self, ui: &mut Ui) {
@@ -2069,69 +2383,68 @@ impl CompanionApp {
             log::warn!(target: "companion::app", "settings_flush_boundary outcome=failed");
         }
     }
-    fn draw_menu(&mut self, ui: &mut Ui) {
+    fn draw_menu_contents(&mut self, ui: &mut Ui) {
         let reset_available = !self.state.is_busy();
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("Menu", |ui| {
-                ui.label(format!("Companion version: {}", app_version()));
-                let mod_label = match &self.state.bridge_listener.status().mod_version {
-                    ModVersionObservation::Unknown => "unknown".to_owned(),
-                    ModVersionObservation::Legacy => "legacy (no version reporting)".to_owned(),
-                    ModVersionObservation::Invalid => "invalid".to_owned(),
-                    ModVersionObservation::Reported(version) => format!("last observed {version}"),
-                };
-                ui.label(format!("Mod version: {mod_label}"));
-                match &self.version_check.state {
-                    VersionCheckState::Checking => ui.label("Latest stable: checking…"),
-                    VersionCheckState::Current { latest } => {
-                        ui.label(format!("Latest stable: {latest} (current)"))
-                    }
-                    VersionCheckState::UpdateAvailable { latest } => {
-                        ui.label(format!("Latest stable: {latest} (update available)"))
-                    }
-                    VersionCheckState::Unavailable { reason } => {
-                        ui.label(format!("Latest stable: unavailable ({reason})"))
-                    }
-                };
-                let checking = self.version_check.is_checking();
-                if ui
-                    .add_enabled(!checking, egui::Button::new("Check for updates"))
-                    .clicked()
-                {
-                    self.version_check.start(ui.ctx().clone());
-                }
-                ui.separator();
-                if ui.button("Open config folder").clicked() {
-                    log::info!(target: "companion::app", "config_folder_open_requested");
-                    self.menu_error = self.persistence.open_config_directory().err();
-                    if let Some(error) = &self.menu_error {
-                        log::warn!(
-                            target: "companion::app",
-                            "config_folder_open_failed error={:?}",
-                            error
-                        );
-                    }
-                }
-                if ui.button("Show logs").clicked() {
-                    self.logs_window_open = true;
-                    ui.close();
-                }
-                ui.separator();
-                let response =
-                    ui.add_enabled(reset_available, egui::Button::new("Reset saved state…"));
-                if response.clicked() {
-                    self.reset_confirmation = true;
-                }
-                if !reset_available {
-                    response.on_disabled_hover_text(
-                        "Wait for connection, test action, and action work to finish before resetting.",
-                    );
-                }
-            });
-        });
+        ui.label(format!("Companion version: {}", app_version()));
+        let mod_label = match &self.state.bridge_listener.status().mod_version {
+            ModVersionObservation::Unknown => "unknown".to_owned(),
+            ModVersionObservation::Legacy => "legacy (no version reporting)".to_owned(),
+            ModVersionObservation::Invalid => "invalid".to_owned(),
+            ModVersionObservation::Reported(version) => format!("last observed {version}"),
+        };
+        ui.label(format!("Mod version: {mod_label}"));
+        match &self.version_check.state {
+            VersionCheckState::Checking => ui.label("Latest stable: checking…"),
+            VersionCheckState::Current { latest } => {
+                ui.label(format!("Latest stable: {latest} (current)"))
+            }
+            VersionCheckState::UpdateAvailable { latest } => {
+                ui.label(format!("Latest stable: {latest} (update available)"))
+            }
+            VersionCheckState::Unavailable { reason } => {
+                ui.label(format!("Latest stable: unavailable ({reason})"))
+            }
+        };
+        let checking = self.version_check.is_checking();
+        if ui
+            .add_enabled(!checking, egui::Button::new("Check for updates"))
+            .clicked()
+        {
+            self.version_check.start(ui.ctx().clone());
+        }
+        ui.separator();
+        if ui.button("Open config folder").clicked() {
+            log::info!(target: "companion::app", "config_folder_open_requested");
+            self.menu_error = self.persistence.open_config_directory().err();
+            if let Some(error) = &self.menu_error {
+                log::warn!(
+                    target: "companion::app",
+                    "config_folder_open_failed error={:?}",
+                    error
+                );
+            }
+        }
+        if ui.button("Show logs").clicked() {
+            self.logs_window_open = true;
+            ui.close();
+        }
+        if ui.button("Credits").clicked() {
+            self.credits_window_open = true;
+            ui.close();
+        }
+        ui.separator();
+        let response = ui.add_enabled(reset_available, egui::Button::new("Reset saved state…"));
+        if response.clicked() {
+            self.reset_confirmation = true;
+        }
+        if !reset_available {
+            response.on_disabled_hover_text(
+                "Wait for connection, test action, and action work to finish before resetting.",
+            );
+        }
     }
 
-    fn draw_reset_confirmation(&mut self, ui: &mut Ui) {
+    fn draw_reset_confirmation(&mut self, ctx: &egui::Context) {
         if !self.reset_confirmation {
             return;
         }
@@ -2144,7 +2457,7 @@ impl CompanionApp {
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
-            .show(ui.ctx(), |ui| {
+            .show(ctx, |ui| {
                 ui.label(
                     "This clears saved provider setup, target preference, trigger action settings, and log path.",
                 );
@@ -2204,6 +2517,16 @@ fn trigger_display_label(kind: TriggerKind) -> &'static str {
     }
 }
 
+fn trigger_icon(kind: TriggerKind) -> &'static str {
+    match kind {
+        TriggerKind::Death => egui_phosphor::regular::SKULL,
+        TriggerKind::Kill => egui_phosphor::regular::SWORD,
+        TriggerKind::Assist => egui_phosphor::regular::HANDSHAKE,
+        TriggerKind::AbilityUse => egui_phosphor::regular::MAGIC_WAND,
+        TriggerKind::AbilityCooldownReady => egui_phosphor::regular::HOURGLASS_SIMPLE,
+    }
+}
+
 fn first_copy_source(destination: TriggerKind) -> TriggerKind {
     match destination {
         TriggerKind::Death => TriggerKind::AbilityUse,
@@ -2213,43 +2536,141 @@ fn first_copy_source(destination: TriggerKind) -> TriggerKind {
     }
 }
 
+/// The window has no OS decorations (custom title bar instead), so there is
+/// no native edge-drag resize affordance. This paints invisible drag strips
+/// along the screen edges/corners that issue `BeginResize` to the backend.
+fn draw_resize_borders(ctx: &egui::Context) {
+    let screen = ctx.input(|i| i.viewport_rect());
+    if !screen.is_positive() {
+        return;
+    }
+
+    let border = 6.0;
+    let corner = 14.0;
+    let zones: [(egui::Rect, egui::CursorIcon, egui::ResizeDirection); 8] = [
+        (
+            egui::Rect::from_min_size(screen.left_top(), egui::vec2(corner, corner)),
+            egui::CursorIcon::ResizeNorthWest,
+            egui::ResizeDirection::NorthWest,
+        ),
+        (
+            egui::Rect::from_min_size(
+                egui::pos2(screen.right() - corner, screen.top()),
+                egui::vec2(corner, corner),
+            ),
+            egui::CursorIcon::ResizeNorthEast,
+            egui::ResizeDirection::NorthEast,
+        ),
+        (
+            egui::Rect::from_min_size(
+                egui::pos2(screen.left(), screen.bottom() - corner),
+                egui::vec2(corner, corner),
+            ),
+            egui::CursorIcon::ResizeSouthWest,
+            egui::ResizeDirection::SouthWest,
+        ),
+        (
+            egui::Rect::from_min_size(
+                egui::pos2(screen.right() - corner, screen.bottom() - corner),
+                egui::vec2(corner, corner),
+            ),
+            egui::CursorIcon::ResizeSouthEast,
+            egui::ResizeDirection::SouthEast,
+        ),
+        (
+            egui::Rect::from_min_size(
+                egui::pos2(screen.left(), screen.top() + corner),
+                egui::vec2(border, (screen.height() - 2.0 * corner).max(0.0)),
+            ),
+            egui::CursorIcon::ResizeWest,
+            egui::ResizeDirection::West,
+        ),
+        (
+            egui::Rect::from_min_size(
+                egui::pos2(screen.right() - border, screen.top() + corner),
+                egui::vec2(border, (screen.height() - 2.0 * corner).max(0.0)),
+            ),
+            egui::CursorIcon::ResizeEast,
+            egui::ResizeDirection::East,
+        ),
+        (
+            egui::Rect::from_min_size(
+                egui::pos2(screen.left() + corner, screen.top()),
+                egui::vec2((screen.width() - 2.0 * corner).max(0.0), border),
+            ),
+            egui::CursorIcon::ResizeNorth,
+            egui::ResizeDirection::North,
+        ),
+        (
+            egui::Rect::from_min_size(
+                egui::pos2(screen.left() + corner, screen.bottom() - border),
+                egui::vec2((screen.width() - 2.0 * corner).max(0.0), border),
+            ),
+            egui::CursorIcon::ResizeSouth,
+            egui::ResizeDirection::South,
+        ),
+    ];
+
+    egui::Area::new(egui::Id::new("resize_borders"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            for (index, (rect, cursor, direction)) in zones.into_iter().enumerate() {
+                if !rect.is_positive() {
+                    continue;
+                }
+                let id = ui.id().with(("resize_zone", index));
+                let response = ui.interact(rect, id, egui::Sense::drag());
+                if response.hovered() || response.dragged() {
+                    ui.ctx().set_cursor_icon(cursor);
+                }
+                if response.drag_started() {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+                }
+            }
+        });
+}
+
 fn toggle_button(ui: &mut Ui, value: &mut bool) {
     let label = if *value { "On" } else { "Off" };
-    if ui
-        .add(
-            egui::Button::new(label)
-                .selected(*value)
-                .min_size(egui::vec2(44.0, 0.0)),
-        )
-        .clicked()
-    {
+    let (fill, text_color) = if *value {
+        (crate::theme::ACCENT, egui::Color32::WHITE)
+    } else {
+        (crate::theme::CARD_RAISED, crate::theme::TEXT_DIM)
+    };
+    let button = egui::Button::new(egui::RichText::new(label).strong().color(text_color))
+        .fill(fill)
+        .corner_radius(egui::CornerRadius::same(255))
+        .min_size(egui::vec2(52.0, 0.0));
+    if ui.add(button).clicked() {
         *value = !*value;
     }
 }
 
 fn draw_listener_status(ui: &mut Ui, status: &ListenerStatus, last_event: Option<&BridgeEvent>) {
-    let (phase_label, phase_color) = match status.phase {
-        ListenerPhase::Stopped => ("Listener stopped.".to_owned(), [0.65, 0.65, 0.65, 1.0]),
+    let (phase_label, phase_tone) = match status.phase {
+        ListenerPhase::Stopped => ("Listener stopped.".to_owned(), crate::theme::BadgeTone::Neutral),
         ListenerPhase::WaitingForFile => (
             "Listener waiting for console.log to be created.".to_owned(),
-            [0.92, 0.68, 0.22, 1.0],
+            crate::theme::BadgeTone::Warning,
         ),
         ListenerPhase::Listening => (
             "Listener is monitoring console.log.".to_owned(),
-            [0.30, 0.78, 0.42, 1.0],
+            crate::theme::BadgeTone::Success,
         ),
         ListenerPhase::Failed => (
             format!(
                 "Listener failed: {}",
                 status.current_error.as_deref().unwrap_or("unknown error")
             ),
-            [0.92, 0.32, 0.28, 1.0],
+            crate::theme::BadgeTone::Danger,
         ),
     };
     if let Some(path) = &status.configured_path {
         ui.label(format!("Configured listener path: {}", path.display()));
     }
-    status_line(ui, &phase_label, phase_color);
+    crate::theme::badge(ui, &phase_label, phase_tone);
     let activity = status
         .last_activity_at
         .map(|at| format!("Last log activity: {} ago.", format_duration(at.elapsed())))
@@ -2342,7 +2763,7 @@ fn to_color(color: [f32; 4]) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{ResolvedShockAction, ShockActionSettings, ShockMode};
+    use crate::action::VibrateMode;
     use crate::logging::CapturingWriter;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
@@ -2366,60 +2787,32 @@ mod tests {
         }
     }
 
-    fn resolved(intensity: u8, duration_ms: u64) -> ResolvedAction {
-        ResolvedAction::Shock(ResolvedShockAction {
-            intensity,
-            duration_ms,
-        })
-    }
-
-    #[test]
-    fn provider_setup_retention_uses_only_typed_banks() {
-        let mut state = AppState::default();
-        state.provider_settings.pishock.username = "user".into();
-        state.provider_settings.pishock.api_key = "key".into();
-        state.set_provider(ProviderKind::OpenShock);
-        state.provider_settings.openshock.token = "token".into();
-        assert!(state.credentials_present());
-        state.set_provider(ProviderKind::PiShock);
-        assert_eq!(state.provider_settings.pishock.username, "user");
-        assert_eq!(state.provider_settings.pishock.api_key, "key");
-        assert_eq!(state.provider_settings.openshock.token, "token");
-    }
-
-    #[test]
-    fn switching_provider_clears_live_and_preferred_targets() {
-        let mut state = AppState {
-            devices: vec![ProviderTarget::new(TargetId::PiShock(1), "hub")],
-            selected_device: Some(TargetId::PiShock(1)),
-            preferred_target: Some(TargetId::PiShock(1)),
-            ..AppState::default()
-        };
-        state.set_provider(ProviderKind::OpenShock);
-        assert!(state.devices.is_empty());
-        assert!(state.selected_device.is_none());
-        assert!(state.preferred_target.is_none());
+    fn resolved(strength: u8, duration_secs: u32) -> ResolvedVibrateAction {
+        ResolvedVibrateAction {
+            strength,
+            duration_secs,
+        }
     }
 
     #[test]
     fn action_resolution_is_an_immutable_snapshot() {
-        let mut settings = ShockActionSettings::default();
-        settings.mode = ShockMode::Fixed;
-        settings.fixed.intensity = 41.0;
-        settings.fixed.duration_seconds = 1.2;
+        let mut settings = VibrateActionSettings::default();
+        settings.mode = VibrateMode::Fixed;
+        settings.fixed.strength = 14.0;
+        settings.fixed.duration_seconds = 3.0;
         let mut rng = StdRng::seed_from_u64(4);
         let snapshot = settings.resolve_with(&mut rng).unwrap();
-        settings.fixed.intensity = 99.0;
-        assert_eq!(settings.fixed.intensity, 99.0);
-        assert_eq!(snapshot.intensity, 41);
-        assert_eq!(snapshot.duration_ms, 1_200);
+        settings.fixed.strength = 20.0;
+        assert_eq!(settings.fixed.strength, 20.0);
+        assert_eq!(snapshot.strength, 14);
+        assert_eq!(snapshot.duration_secs, 3);
     }
 
     #[test]
     fn invalid_fixed_action_settings_are_skipped_without_fabricating_an_action() {
         let mut state = AppState::default();
-        state.triggers.death.actions.shock.mode = ShockMode::Fixed;
-        state.triggers.death.actions.shock.fixed.intensity = 0.0;
+        state.triggers.death.actions.mode = VibrateMode::Fixed;
+        state.triggers.death.actions.fixed.strength = 21.0;
         state.queue_trigger_action(trigger(TriggerKind::Death, "session", 1));
         let Some(ActionStatus::Skipped { snapshot, reason }) = state.action_status else {
             panic!("invalid settings should be skipped");
@@ -2432,14 +2825,14 @@ mod tests {
     fn copy_transfers_only_active_action_settings() {
         let mut state = AppState::default();
         state.triggers.death.enabled = false;
-        state.triggers.death.actions.shock.mode = ShockMode::Fixed;
-        state.triggers.death.actions.shock.fixed.intensity = 61.0;
+        state.triggers.death.actions.mode = VibrateMode::Fixed;
+        state.triggers.death.actions.fixed.strength = 15.0;
         state.triggers.ability_use.trigger.enabled = true;
         state.triggers.ability_use.ability_filter = AbilityFilter::Selected(BTreeSet::from([2]));
         assert!(state.copy_action_settings(TriggerKind::Death, TriggerKind::AbilityUse));
         assert_eq!(
-            state.triggers.ability_use.trigger.actions.shock,
-            state.triggers.death.actions.shock
+            state.triggers.ability_use.trigger.actions,
+            state.triggers.death.actions
         );
         assert!(state.triggers.ability_use.trigger.enabled);
         assert_eq!(
@@ -2473,9 +2866,8 @@ mod tests {
     #[test]
     fn queue_outcomes_use_generic_action_statuses() {
         let request = ActionRequest {
-            provider: ProviderKind::PiShock,
             target: None,
-            resolved: resolved(20, 500),
+            resolved: resolved(15, 3),
             trigger: trigger(TriggerKind::Death, "session", 1),
             queued_at: Instant::now(),
         };
@@ -2514,8 +2906,8 @@ mod tests {
     #[test]
     fn kill_and_assist_triggers_queue_independently_of_death() {
         let mut state = AppState {
-            devices: vec![ProviderTarget::new(TargetId::PiShock(1), "hub")],
-            selected_device: Some(TargetId::PiShock(1)),
+            devices: vec![ProviderTarget::new("toy-1", "hub")],
+            selected_device: Some("toy-1".to_owned()),
             ..AppState::default()
         };
         state.triggers.kill.enabled = true;
@@ -2543,12 +2935,8 @@ mod tests {
     #[test]
     fn action_status_contains_provider_target_and_trigger_details() {
         let status = ActionStatus::Sent(ActionRequest {
-            provider: ProviderKind::OpenShock,
-            target: Some(ProviderTarget::new(
-                TargetId::OpenShock("group".to_owned()),
-                "group",
-            )),
-            resolved: resolved(20, 500),
+            target: Some(ProviderTarget::new("group".to_owned(), "group")),
+            resolved: resolved(15, 3),
             trigger: {
                 let mut trigger = trigger(TriggerKind::AbilityCooldownReady, "session", 9);
                 trigger.detection = "charge_restored".to_owned();
@@ -2559,9 +2947,9 @@ mod tests {
             queued_at: Instant::now(),
         });
         let label = status.label();
-        assert!(label.contains("OpenShock"));
+        assert!(label.contains("Lovense"));
         assert!(label.contains("group"));
-        assert!(label.contains("20% for 0.5 s"));
+        assert!(label.contains("15/20 for 3 s"));
         assert!(label.contains("ability cooldown ready slot 2"));
         assert!(label.contains("charge_restored"));
         assert!(label.contains("charges 1→2"));
@@ -2570,21 +2958,21 @@ mod tests {
     #[test]
     fn reset_clears_durable_banks_and_runtime_action_state() {
         let mut state = AppState::default();
-        state.provider_settings.openshock.token = "secret".into();
-        state.triggers.death.actions.shock.mode = ShockMode::Fixed;
+        state.provider_settings.lovense.domain = "custom.lan".into();
+        state.triggers.death.actions.mode = VibrateMode::Fixed;
         assert!(state.reset_saved_state());
         assert_eq!(state.provider_settings, ProviderSettings::default());
         assert!(state.runtime_trigger_and_action_state_is_clear());
     }
     #[test]
     fn preferred_target_is_reconciled_against_fresh_targets() {
-        let preferred = TargetId::PiShock(2);
+        let preferred: TargetId = "toy-2".to_owned();
         let mut state = AppState {
             preferred_target: Some(preferred.clone()),
             ..AppState::default()
         };
         state.apply_devices(vec![
-            ProviderTarget::new(TargetId::PiShock(1), "Alpha"),
+            ProviderTarget::new("toy-1", "Alpha"),
             ProviderTarget::new(preferred.clone(), "Beta"),
         ]);
         assert_eq!(state.selected_device, Some(preferred.clone()));
@@ -2597,23 +2985,23 @@ mod tests {
         assert_eq!(state.preferred_target, Some(preferred.clone()));
         state.apply_connection_result(Err(ProviderError::NotConnected));
         assert_eq!(state.preferred_target, Some(preferred));
-        state.apply_devices(vec![ProviderTarget::new(TargetId::PiShock(3), "Gamma")]);
-        assert_eq!(state.selected_device, Some(TargetId::PiShock(3)));
-        assert!(!state.select_device(TargetId::PiShock(99)));
+        state.apply_devices(vec![ProviderTarget::new("toy-3", "Gamma")]);
+        assert_eq!(state.selected_device, Some("toy-3".to_owned()));
+        assert!(!state.select_device("toy-99".to_owned()));
     }
 
     #[test]
     fn failed_connection_clears_stale_live_targets_but_preserves_preference() {
         let mut state = AppState {
-            devices: vec![ProviderTarget::new(TargetId::PiShock(1), "hub")],
-            selected_device: Some(TargetId::PiShock(1)),
-            preferred_target: Some(TargetId::PiShock(1)),
+            devices: vec![ProviderTarget::new("toy-1", "hub")],
+            selected_device: Some("toy-1".to_owned()),
+            preferred_target: Some("toy-1".to_owned()),
             ..AppState::default()
         };
         state.apply_connection_result(Err(ProviderError::NotConnected));
         assert!(state.devices.is_empty());
         assert!(state.selected_device.is_none());
-        assert_eq!(state.preferred_target, Some(TargetId::PiShock(1)));
+        assert_eq!(state.preferred_target, Some("toy-1".to_owned()));
         assert_eq!(state.credential_state, CredentialState::Invalid);
     }
 
@@ -2630,7 +3018,7 @@ mod tests {
     }
 
     #[test]
-    fn all_effect_editors_render_both_shock_modes() {
+    fn all_effect_editors_render_both_vibrate_modes() {
         for kind in [
             TriggerKind::Death,
             TriggerKind::Kill,
@@ -2638,12 +3026,13 @@ mod tests {
             TriggerKind::AbilityUse,
             TriggerKind::AbilityCooldownReady,
         ] {
-            for mode in [ShockMode::Interval, ShockMode::Fixed] {
+            for mode in [VibrateMode::Interval, VibrateMode::Fixed] {
                 let context = egui::Context::default();
+        crate::theme::install_fonts(&context);
                 let mut state = AppState::default();
                 state.selected_section = AppSection::Effects;
                 state.selected_effect = kind;
-                state.triggers.get_mut(kind).actions.shock.mode = mode;
+                state.triggers.get_mut(kind).actions.mode = mode;
                 if matches!(
                     kind,
                     TriggerKind::AbilityUse | TriggerKind::AbilityCooldownReady
@@ -2658,19 +3047,6 @@ mod tests {
                 assert!(!output.shapes.is_empty());
             }
         }
-    }
-
-    #[test]
-    fn openshock_form_renders() {
-        let context = egui::Context::default();
-        let mut state = AppState {
-            provider: ProviderKind::OpenShock,
-            ..AppState::default()
-        };
-        let output = context.run_ui(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| state.draw(ui));
-        });
-        assert!(!output.shapes.is_empty());
     }
 
     #[test]
@@ -2851,9 +3227,8 @@ mod tests {
     #[test]
     fn expired_completion_is_skipped_and_decrements_in_flight() {
         let request = ActionRequest {
-            provider: ProviderKind::PiShock,
             target: None,
-            resolved: resolved(20, 500),
+            resolved: resolved(15, 3),
             trigger: trigger(TriggerKind::Death, "session", 1),
             queued_at: Instant::now(),
         };
@@ -2959,37 +3334,22 @@ mod tests {
     fn trigger_routing_resolves_selected_profile_before_status() {
         let mut state = AppState::default();
         state.triggers.ability_use.trigger.enabled = true;
-        state.triggers.ability_use.trigger.actions.shock.mode = ShockMode::Fixed;
+        state.triggers.ability_use.trigger.actions.mode = VibrateMode::Fixed;
+        state.triggers.ability_use.trigger.actions.fixed.strength = 17.0;
         state
             .triggers
             .ability_use
             .trigger
             .actions
-            .shock
             .fixed
-            .intensity = 73.0;
-        state
-            .triggers
-            .ability_use
-            .trigger
-            .actions
-            .shock
-            .fixed
-            .duration_seconds = 2.1;
+            .duration_seconds = 5.0;
         state.queue_trigger_action(trigger(TriggerKind::AbilityUse, "session", 1));
         let Some(status) = state.action_status.clone() else {
             panic!("enabled trigger should record missing-provider status");
         };
-        assert_eq!(status.snapshot().resolved, Some(resolved(73, 2_100)));
-        state
-            .triggers
-            .ability_use
-            .trigger
-            .actions
-            .shock
-            .fixed
-            .intensity = 5.0;
-        assert_eq!(status.snapshot().resolved, Some(resolved(73, 2_100)));
+        assert_eq!(status.snapshot().resolved, Some(resolved(17, 5)));
+        state.triggers.ability_use.trigger.actions.fixed.strength = 5.0;
+        assert_eq!(status.snapshot().resolved, Some(resolved(17, 5)));
     }
 
     #[test]
@@ -3021,18 +3381,17 @@ mod tests {
     fn reset_is_blocked_by_each_in_flight_work_kind() {
         let mut connection_busy = AppState {
             provider_settings: ProviderSettings {
-                pishock: crate::provider::PiShockSetup {
-                    username: "keep".to_owned(),
+                lovense: crate::provider::LovenseSetup {
+                    domain: "keep.lan".to_owned(),
                     ..Default::default()
                 },
-                ..Default::default()
             },
             ..AppState::default()
         };
         let (_sender, receiver) = mpsc::channel();
         connection_busy.connection_result = Some(receiver);
         assert!(!connection_busy.reset_saved_state());
-        assert_eq!(connection_busy.provider_settings.pishock.username, "keep");
+        assert_eq!(connection_busy.provider_settings.lovense.domain, "keep.lan");
         let mut test_busy = AppState::default();
         let (_sender, receiver) = mpsc::channel();
         test_busy.test_action_result = Some(receiver);
@@ -3042,6 +3401,27 @@ mod tests {
             ..AppState::default()
         };
         assert!(!action_busy.reset_saved_state());
+        let mut refresh_busy = AppState::default();
+        let (_sender, receiver) = mpsc::channel();
+        refresh_busy.device_refresh_result = Some(receiver);
+        assert!(refresh_busy.is_busy());
+        assert!(!refresh_busy.reset_saved_state());
+    }
+
+    #[test]
+    fn device_refresh_replaces_stale_toy_list_without_reconnecting() {
+        let mut state = AppState::default();
+        state.devices = vec![ProviderTarget::new("stale-toy", "Stale")];
+        state.selected_device = Some("stale-toy".to_owned());
+        let (sender, receiver) = mpsc::channel();
+        state.device_refresh_result = Some(receiver);
+        sender
+            .send(Ok(vec![ProviderTarget::new("fresh-toy", "Fresh")]))
+            .unwrap();
+        state.poll_device_refresh();
+        assert!(state.device_refresh_result.is_none());
+        assert_eq!(state.devices, vec![ProviderTarget::new("fresh-toy", "Fresh")]);
+        assert_eq!(state.selected_device, Some("fresh-toy".to_owned()));
     }
 
     #[test]
@@ -3051,11 +3431,10 @@ mod tests {
         let mut app = CompanionApp::load_from_path_with_detector(path.clone(), || {
             Err(DetectionError::DeadlockNotInstalled)
         });
-        app.state.provider = ProviderKind::OpenShock;
-        app.state.provider_settings.openshock.token = "secret".to_owned();
-        app.state.preferred_target = Some(TargetId::OpenShock("group".to_owned()));
-        app.state.triggers.death.actions.shock.mode = ShockMode::Fixed;
-        app.state.triggers.death.actions.shock.fixed.intensity = 80.0;
+        app.state.provider_settings.lovense.domain = "custom.lan".to_owned();
+        app.state.preferred_target = Some("group".to_owned());
+        app.state.triggers.death.actions.mode = VibrateMode::Fixed;
+        app.state.triggers.death.actions.fixed.strength = 18.0;
         app.state.log_path = directory.path().join("console.log").display().to_string();
         let _ = app
             .state
@@ -3081,6 +3460,7 @@ mod tests {
                 Err(DetectionError::DeadlockNotInstalled)
             });
         let context = egui::Context::default();
+        crate::theme::install_fonts(&context);
         let output = context.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
         });
@@ -3099,6 +3479,7 @@ mod tests {
         );
         let persisted = PersistedState::from_app(&app.state);
         let context = egui::Context::default();
+        crate::theme::install_fonts(&context);
         app.logs_window_open = true;
         let output = context.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
@@ -3119,9 +3500,8 @@ mod tests {
     #[test]
     fn completed_action_decrements_in_flight_and_records_sent_status() {
         let request = ActionRequest {
-            provider: ProviderKind::PiShock,
             target: None,
-            resolved: resolved(20, 500),
+            resolved: resolved(15, 3),
             trigger: trigger(TriggerKind::Death, "session", 1),
             queued_at: Instant::now(),
         };
@@ -3143,17 +3523,17 @@ mod tests {
     }
 
     #[test]
-    fn no_connection_and_missing_target_paths_report_skips() {
+    fn no_connection_reports_skip_with_or_without_a_selected_toy() {
         let mut state = AppState::default();
         state.queue_trigger_action(trigger(TriggerKind::Death, "session", 1));
         assert!(matches!(
             state.action_status,
-            Some(ActionStatus::Skipped { reason, .. }) if reason == "no target is selected"
+            Some(ActionStatus::Skipped { reason, .. }) if reason == "provider is not connected"
         ));
 
         let mut connected_shape = AppState {
-            devices: vec![ProviderTarget::new(TargetId::PiShock(1), "hub")],
-            selected_device: Some(TargetId::PiShock(1)),
+            devices: vec![ProviderTarget::new("toy-1", "hub")],
+            selected_device: Some("toy-1".to_owned()),
             ..AppState::default()
         };
         connected_shape.queue_trigger_action(trigger(TriggerKind::Death, "session", 1));
@@ -3161,19 +3541,5 @@ mod tests {
             connected_shape.action_status,
             Some(ActionStatus::Skipped { reason, .. }) if reason == "provider is not connected"
         ));
-    }
-    #[test]
-    fn optional_and_none_target_policies_reach_adapter_boundary() {
-        let selected = Some(ProviderTarget::new(TargetId::PiShock(1), "hub"));
-        assert!(
-            AppState::target_for_policy(crate::provider::TargetPolicy::Optional, None).is_none()
-        );
-        assert!(
-            AppState::target_for_policy(crate::provider::TargetPolicy::Optional, selected.clone())
-                .is_some()
-        );
-        assert!(
-            AppState::target_for_policy(crate::provider::TargetPolicy::None, selected).is_none()
-        );
     }
 }

@@ -8,6 +8,7 @@ pub mod deadlock_path;
 pub mod logging;
 pub mod persistence;
 pub mod provider;
+pub mod theme;
 pub mod version_check;
 use app::CompanionApp;
 use eframe::egui;
@@ -49,17 +50,21 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("DeadlockShock Companion")
-            .with_inner_size([520.0, 720.0])
-            .with_min_inner_size([420.0, 600.0])
-            .with_icon(app_icon()),
+            .with_title("Lovelock Companion")
+            .with_inner_size([1180.0, 760.0])
+            .with_min_inner_size([860.0, 560.0])
+            .with_icon(app_icon())
+            .with_decorations(false)
+            .with_transparent(false),
         ..Default::default()
     };
 
     let result = eframe::run_native(
-        "DeadlockShock Companion",
+        "Lovelock Companion",
         options,
         Box::new(|creation_context| {
+            theme::apply(&creation_context.egui_ctx);
+            theme::install_fonts(&creation_context.egui_ctx);
             Ok(Box::new(CompanionApp::load_with_context(
                 creation_context.egui_ctx.clone(),
                 log_store.clone(),

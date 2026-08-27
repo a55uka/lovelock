@@ -9,8 +9,6 @@ egui = "0.35"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 semver = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
-pishock = { path = "../pishock" }
-openshock = { path = "../openshock" }
 lovense = { path = "../lovense" }
 steamlocate = "2.1"
 serde = { version = "1", features = ["derive"] }
@@ -21,6 +19,7 @@ dirs = "6"
 tempfile = "3"
 log = "0.4"
 env_logger = "0.11"
+egui-phosphor = "0.13.0"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

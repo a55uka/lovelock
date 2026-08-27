@@ -127,6 +127,7 @@ impl LovenseClient {
 
     pub fn list_toys(&self) -> Result<Vec<Toy>, Error> {
         let response = self.send(&json!({ "command": "GetToys" }))?;
+        log::debug!(target: "lovense", "get_toys_response body={response}");
         let toys_json = response
             .get("data")
             .and_then(|data| data.get("toys"))
@@ -140,11 +141,22 @@ impl LovenseClient {
         let toys = toys.as_object().ok_or(Error::Decode {
             operation: "toy listing",
         })?;
-        Ok(toys
+        let reported = toys.len();
+        let decoded: Vec<Toy> = toys
             .values()
             .filter_map(|value| serde_json::from_value::<WireToy>(value.clone()).ok())
             .map(WireToy::into_toy)
-            .collect())
+            .collect();
+        if decoded.len() != reported {
+            log::warn!(
+                target: "lovense",
+                "get_toys_partial_decode reported={reported} decoded={} raw={toys_json}",
+                decoded.len()
+            );
+        } else {
+            log::debug!(target: "lovense", "get_toys_decoded count={}", decoded.len());
+        }
+        Ok(decoded)
     }
 
     /// Vibrates `toy`, or every connected toy when `toy` is `None`.
@@ -239,11 +251,27 @@ struct WireToy {
     name: Option<String>,
     #[serde(default, rename = "nickName")]
     nick_name: Option<String>,
-    #[serde(default)]
+    /// Documented as a string ("1"/"0"), but observed in the wild as a bare
+    /// JSON number (1/0) depending on app version, so this accepts either.
+    #[serde(default, deserialize_with = "deserialize_flexible_string_opt")]
     status: Option<String>,
     #[serde(default)]
     battery: Option<i64>,
 }
+
+fn deserialize_flexible_string_opt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<Value> = Option::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        Value::String(text) => Some(text),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }))
+}
+
 impl WireToy {
     fn into_toy(self) -> Toy {
         Toy {
@@ -306,6 +334,31 @@ mod tests {
         assert_eq!(toy.name, "my toy");
         assert!(toy.status_connected);
         assert_eq!(toy.battery, Some(87));
+    }
+
+    #[test]
+    fn wire_toy_accepts_numeric_status_from_real_world_app_responses() {
+        // Lovense's docs show `"status": "1"` as a string, but some app
+        // versions report a bare JSON number instead; both must decode.
+        let toy: WireToy = serde_json::from_value(json!({
+            "id": "881a144613cf",
+            "name": "tenera",
+            "nickName": "",
+            "status": 1,
+            "battery": 100
+        }))
+        .unwrap();
+        let toy = toy.into_toy();
+        assert_eq!(toy.name, "tenera");
+        assert!(toy.status_connected);
+        assert_eq!(toy.battery, Some(100));
+
+        let disconnected: WireToy = serde_json::from_value(json!({
+            "id": "881a144613cf",
+            "status": 0
+        }))
+        .unwrap();
+        assert!(!disconnected.into_toy().status_connected);
     }
 
     #[test]

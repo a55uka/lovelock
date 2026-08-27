@@ -15,7 +15,7 @@ pub const LATEST_RELEASE_URL: &str =
 pub const COMPANION_RELEASE_URL: &str =
     "https://github.com/VolcanoCookies/deadlockshock/releases/latest";
 pub const MOD_RELEASE_URL: &str = "https://gamebanana.com/mods/700758";
-pub const USER_AGENT: &str = concat!("DeadlockShock-Companion/", env!("CARGO_PKG_VERSION"));
+pub const USER_AGENT: &str = concat!("Lovelock-Companion/", env!("CARGO_PKG_VERSION"));
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;

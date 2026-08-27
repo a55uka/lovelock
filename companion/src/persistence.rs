@@ -9,92 +9,27 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::action::{
-    ActionSettings, MAX_SHOCK_DURATION, MAX_SHOCK_INTENSITY, MIN_SHOCK_DURATION,
-    MIN_SHOCK_INTENSITY, ShockActionSettings, ShockFixedSettings, ShockIntervalSettings, ShockMode,
+    MAX_VIBRATE_DURATION, MAX_VIBRATE_STRENGTH, MIN_VIBRATE_DURATION, MIN_VIBRATE_STRENGTH,
+    VibrateActionSettings, VibrateFixedSettings, VibrateIntervalSettings, VibrateMode,
 };
 use crate::app::{
     AbilityFilter, AbilityTriggerSettings, AppState, TriggerSettings, TriggerSettingsSet,
 };
-use crate::provider::{
-    LovenseSetup, OpenShockSetup, PiShockSetup, ProviderKind, ProviderSettings, TargetId,
-};
+use crate::provider::{LovenseSetup, ProviderSettings, TargetId};
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 pub const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PersistedState {
     schema_version: u32,
-    provider: PersistedProvider,
     provider_settings: PersistedProviderSettings,
     preferred_target: Option<PersistedTarget>,
     triggers: PersistedTriggers,
     log_path: String,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedStateV5 {
-    #[serde(rename = "schema_version")]
-    _schema_version: u32,
-    provider: PersistedProvider,
-    provider_settings: PersistedProviderSettings,
-    preferred_target: Option<PersistedTarget>,
-    triggers: PersistedTriggersV5,
-    log_path: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedStateV4 {
-    #[serde(rename = "schema_version")]
-    _schema_version: u32,
-    provider: PersistedProvider,
-    provider_settings: PersistedProviderSettingsV4,
-    preferred_target: Option<PersistedTarget>,
-    triggers: PersistedTriggersV5,
-    log_path: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedProviderSettingsV4 {
-    pishock: PersistedPiShockSetup,
-    openshock: PersistedOpenShockSetup,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedStateV3 {
-    #[serde(rename = "schema_version")]
-    _schema_version: u32,
-    provider: PersistedProvider,
-    credentials: PersistedProviderSettingsV4,
-    preferred_target: Option<PersistedTarget>,
-    triggers: PersistedTriggersV3,
-    log_path: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedStateV2 {
-    #[serde(rename = "schema_version")]
-    _schema_version: u32,
-    provider: PersistedProvider,
-    credentials: PersistedProviderSettingsV4,
-    preferred_target: Option<PersistedTarget>,
-    shock: PersistedShock,
-    triggers: PersistedTriggersV2,
-    log_path: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedStateV1 {
-    #[serde(rename = "schema_version")]
-    _schema_version: u32,
-    provider: PersistedProvider,
-    credentials: PersistedProviderSettingsV4,
-    preferred_target: Option<PersistedTarget>,
-    shock: PersistedShock,
-    log_path: String,
-}
 #[derive(Deserialize)]
 struct SchemaVersion {
     schema_version: u32,
@@ -109,48 +44,6 @@ struct PersistedTriggers {
     ability_used: PersistedAbilityTrigger,
     ability_cooldown_ready: PersistedAbilityTrigger,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedTriggersV5 {
-    local_player_death: PersistedTrigger,
-    ability_used: PersistedAbilityTrigger,
-    ability_cooldown_ready: PersistedAbilityTrigger,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedTriggersV3 {
-    local_player_death: PersistedTriggerV3,
-    ability_used: PersistedAbilityTriggerV3,
-    ability_cooldown_ready: PersistedAbilityTriggerV3,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedTriggerV3 {
-    enabled: bool,
-    shock: PersistedShock,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedAbilityTriggerV3 {
-    trigger: PersistedTriggerV3,
-    ability_filter: PersistedAbilityFilter,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedTriggersV2 {
-    local_player_death: bool,
-    ability_used: bool,
-    ability_cooldown_ready: bool,
-}
-impl Default for PersistedTriggersV2 {
-    fn default() -> Self {
-        Self {
-            local_player_death: true,
-            ability_used: false,
-            ability_cooldown_ready: false,
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -161,7 +54,7 @@ struct PersistedTrigger {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedActions {
-    shock: PersistedShock,
+    vibrate: PersistedVibrate,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -191,30 +84,10 @@ impl Default for PersistedAbilityFilter {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum PersistedProvider {
-    PiShock,
-    OpenShock,
-    Lovense,
-}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedProviderSettings {
-    pishock: PersistedPiShockSetup,
-    openshock: PersistedOpenShockSetup,
     lovense: PersistedLovenseSetup,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedPiShockSetup {
-    username: String,
-    api_key: String,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedOpenShockSetup {
-    token: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -235,76 +108,75 @@ impl Default for PersistedLovenseSetup {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedTarget {
-    provider: PersistedProvider,
     id: String,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PersistedShock {
-    mode: PersistedShockMode,
-    interval: PersistedShockInterval,
-    fixed: PersistedShockFixed,
+struct PersistedVibrate {
+    mode: PersistedVibrateMode,
+    interval: PersistedVibrateInterval,
+    fixed: PersistedVibrateFixed,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum PersistedShockMode {
+enum PersistedVibrateMode {
     Interval,
     Fixed,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PersistedShockInterval {
-    minimum_intensity: f32,
-    maximum_intensity: f32,
+struct PersistedVibrateInterval {
+    minimum_strength: f32,
+    maximum_strength: f32,
     minimum_duration_seconds: f32,
     maximum_duration_seconds: f32,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PersistedShockFixed {
-    intensity: f32,
+struct PersistedVibrateFixed {
+    strength: f32,
     duration_seconds: f32,
 }
-impl Default for PersistedShock {
+impl Default for PersistedVibrate {
     fn default() -> Self {
         Self {
-            mode: PersistedShockMode::Interval,
-            interval: PersistedShockInterval {
-                minimum_intensity: MIN_SHOCK_INTENSITY,
-                maximum_intensity: MIN_SHOCK_INTENSITY,
-                minimum_duration_seconds: MIN_SHOCK_DURATION,
-                maximum_duration_seconds: MIN_SHOCK_DURATION,
+            mode: PersistedVibrateMode::Interval,
+            interval: PersistedVibrateInterval {
+                minimum_strength: MIN_VIBRATE_STRENGTH,
+                maximum_strength: MIN_VIBRATE_STRENGTH,
+                minimum_duration_seconds: MIN_VIBRATE_DURATION,
+                maximum_duration_seconds: MIN_VIBRATE_DURATION,
             },
-            fixed: PersistedShockFixed {
-                intensity: MIN_SHOCK_INTENSITY,
-                duration_seconds: MIN_SHOCK_DURATION,
+            fixed: PersistedVibrateFixed {
+                strength: MIN_VIBRATE_STRENGTH,
+                duration_seconds: MIN_VIBRATE_DURATION,
             },
         }
     }
 }
-fn disabled_trigger(shock: PersistedShock) -> PersistedTrigger {
+fn disabled_trigger(vibrate: PersistedVibrate) -> PersistedTrigger {
     PersistedTrigger {
         enabled: false,
-        actions: PersistedActions { shock },
+        actions: PersistedActions { vibrate },
     }
 }
 impl Default for PersistedTriggers {
     fn default() -> Self {
-        let shock = PersistedShock::default();
+        let vibrate = PersistedVibrate::default();
         Self {
             local_player_death: PersistedTrigger {
                 enabled: true,
                 actions: PersistedActions {
-                    shock: shock.clone(),
+                    vibrate: vibrate.clone(),
                 },
             },
-            local_player_kill: disabled_trigger(shock.clone()),
-            local_player_assist: disabled_trigger(shock.clone()),
+            local_player_kill: disabled_trigger(vibrate.clone()),
+            local_player_assist: disabled_trigger(vibrate.clone()),
             ability_used: PersistedAbilityTrigger {
                 trigger: PersistedTrigger {
                     enabled: false,
                     actions: PersistedActions {
-                        shock: shock.clone(),
+                        vibrate: vibrate.clone(),
                     },
                 },
                 ability_filter: PersistedAbilityFilter::default(),
@@ -313,7 +185,7 @@ impl Default for PersistedTriggers {
                 trigger: PersistedTrigger {
                     enabled: false,
                     actions: PersistedActions {
-                        shock: shock.clone(),
+                        vibrate: vibrate.clone(),
                     },
                 },
                 ability_filter: PersistedAbilityFilter::default(),
@@ -324,22 +196,6 @@ impl Default for PersistedTriggers {
 impl Default for PersistedProviderSettings {
     fn default() -> Self {
         Self {
-            pishock: PersistedPiShockSetup {
-                username: String::new(),
-                api_key: String::new(),
-            },
-            openshock: PersistedOpenShockSetup {
-                token: String::new(),
-            },
-            lovense: PersistedLovenseSetup::default(),
-        }
-    }
-}
-impl From<PersistedProviderSettingsV4> for PersistedProviderSettings {
-    fn from(settings: PersistedProviderSettingsV4) -> Self {
-        Self {
-            pishock: settings.pishock,
-            openshock: settings.openshock,
             lovense: PersistedLovenseSetup::default(),
         }
     }
@@ -348,140 +204,10 @@ impl Default for PersistedState {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
-            provider: PersistedProvider::PiShock,
             provider_settings: PersistedProviderSettings::default(),
             preferred_target: None,
             triggers: PersistedTriggers::default(),
             log_path: String::new(),
-        }
-    }
-}
-impl PersistedTriggers {
-    fn from_shared(shock: PersistedShock, enabled: PersistedTriggersV2) -> Self {
-        Self {
-            local_player_death: PersistedTrigger {
-                enabled: enabled.local_player_death,
-                actions: PersistedActions {
-                    shock: shock.clone(),
-                },
-            },
-            local_player_kill: disabled_trigger(shock.clone()),
-            local_player_assist: disabled_trigger(shock.clone()),
-            ability_used: PersistedAbilityTrigger {
-                trigger: PersistedTrigger {
-                    enabled: enabled.ability_used,
-                    actions: PersistedActions {
-                        shock: shock.clone(),
-                    },
-                },
-                ability_filter: PersistedAbilityFilter::default(),
-            },
-            ability_cooldown_ready: PersistedAbilityTrigger {
-                trigger: PersistedTrigger {
-                    enabled: enabled.ability_cooldown_ready,
-                    actions: PersistedActions { shock },
-                },
-                ability_filter: PersistedAbilityFilter::default(),
-            },
-        }
-    }
-    fn from_v3(source: PersistedTriggersV3) -> Self {
-        Self {
-            local_player_death: PersistedTrigger {
-                enabled: source.local_player_death.enabled,
-                actions: PersistedActions {
-                    shock: source.local_player_death.shock.clone(),
-                },
-            },
-            local_player_kill: disabled_trigger(source.local_player_death.shock.clone()),
-            local_player_assist: disabled_trigger(source.local_player_death.shock),
-            ability_used: PersistedAbilityTrigger {
-                trigger: PersistedTrigger {
-                    enabled: source.ability_used.trigger.enabled,
-                    actions: PersistedActions {
-                        shock: source.ability_used.trigger.shock,
-                    },
-                },
-                ability_filter: source.ability_used.ability_filter,
-            },
-            ability_cooldown_ready: PersistedAbilityTrigger {
-                trigger: PersistedTrigger {
-                    enabled: source.ability_cooldown_ready.trigger.enabled,
-                    actions: PersistedActions {
-                        shock: source.ability_cooldown_ready.trigger.shock,
-                    },
-                },
-                ability_filter: source.ability_cooldown_ready.ability_filter,
-            },
-        }
-    }
-    fn from_v5(source: PersistedTriggersV5) -> Self {
-        Self {
-            local_player_death: source.local_player_death.clone(),
-            local_player_kill: disabled_trigger(source.local_player_death.actions.shock.clone()),
-            local_player_assist: disabled_trigger(source.local_player_death.actions.shock),
-            ability_used: source.ability_used,
-            ability_cooldown_ready: source.ability_cooldown_ready,
-        }
-    }
-}
-impl From<PersistedStateV1> for PersistedState {
-    fn from(state: PersistedStateV1) -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION,
-            provider: state.provider,
-            provider_settings: state.credentials.into(),
-            preferred_target: state.preferred_target,
-            triggers: PersistedTriggers::from_shared(state.shock, PersistedTriggersV2::default()),
-            log_path: state.log_path,
-        }
-    }
-}
-impl From<PersistedStateV2> for PersistedState {
-    fn from(state: PersistedStateV2) -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION,
-            provider: state.provider,
-            provider_settings: state.credentials.into(),
-            preferred_target: state.preferred_target,
-            triggers: PersistedTriggers::from_shared(state.shock, state.triggers),
-            log_path: state.log_path,
-        }
-    }
-}
-impl From<PersistedStateV4> for PersistedState {
-    fn from(state: PersistedStateV4) -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION,
-            provider: state.provider,
-            provider_settings: state.provider_settings.into(),
-            preferred_target: state.preferred_target,
-            triggers: PersistedTriggers::from_v5(state.triggers),
-            log_path: state.log_path,
-        }
-    }
-}
-impl From<PersistedStateV5> for PersistedState {
-    fn from(state: PersistedStateV5) -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION,
-            provider: state.provider,
-            provider_settings: state.provider_settings,
-            preferred_target: state.preferred_target,
-            triggers: PersistedTriggers::from_v5(state.triggers),
-            log_path: state.log_path,
-        }
-    }
-}
-impl From<PersistedStateV3> for PersistedState {
-    fn from(state: PersistedStateV3) -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION,
-            provider: state.provider,
-            provider_settings: state.credentials.into(),
-            preferred_target: state.preferred_target,
-            triggers: PersistedTriggers::from_v3(state.triggers),
-            log_path: state.log_path,
         }
     }
 }
@@ -491,15 +217,7 @@ impl PersistedState {
         let setup = app.effective_provider_settings();
         let state = Self {
             schema_version: SCHEMA_VERSION,
-            provider: app.provider.into(),
             provider_settings: PersistedProviderSettings {
-                pishock: PersistedPiShockSetup {
-                    username: setup.pishock.username,
-                    api_key: setup.pishock.api_key,
-                },
-                openshock: PersistedOpenShockSetup {
-                    token: setup.openshock.token,
-                },
                 lovense: PersistedLovenseSetup {
                     domain: setup.lovense.domain,
                     http_port: setup.lovense.http_port,
@@ -516,15 +234,7 @@ impl PersistedState {
     }
     pub(crate) fn restore_app(&self) -> AppState {
         let mut app = AppState::default();
-        app.provider = self.provider.into();
         app.provider_settings = ProviderSettings {
-            pishock: PiShockSetup {
-                username: self.provider_settings.pishock.username.clone(),
-                api_key: self.provider_settings.pishock.api_key.clone(),
-            },
-            openshock: OpenShockSetup {
-                token: self.provider_settings.openshock.token.clone(),
-            },
             lovense: LovenseSetup {
                 domain: self.provider_settings.lovense.domain.clone(),
                 http_port: self.provider_settings.lovense.http_port,
@@ -545,15 +255,20 @@ impl PersistedState {
                 self.schema_version
             ));
         }
-        self.triggers.local_player_death.actions.shock.normalize();
-        self.triggers.local_player_kill.actions.shock.normalize();
-        self.triggers.local_player_assist.actions.shock.normalize();
-        self.triggers.ability_used.trigger.actions.shock.normalize();
+        self.triggers.local_player_death.actions.vibrate.normalize();
+        self.triggers.local_player_kill.actions.vibrate.normalize();
+        self.triggers.local_player_assist.actions.vibrate.normalize();
+        self.triggers
+            .ability_used
+            .trigger
+            .actions
+            .vibrate
+            .normalize();
         self.triggers
             .ability_cooldown_ready
             .trigger
             .actions
-            .shock
+            .vibrate
             .normalize();
         self.triggers.ability_used.ability_filter.normalize();
         self.triggers
@@ -561,8 +276,7 @@ impl PersistedState {
             .ability_filter
             .normalize();
         if let Some(target) = &self.preferred_target {
-            let canonical = PersistedTarget::from_target_id(&target.to_target_id()?);
-            self.preferred_target = (canonical.provider == self.provider).then_some(canonical);
+            self.preferred_target = Some(PersistedTarget::from_target_id(&target.to_target_id()?));
         }
         Ok(self)
     }
@@ -594,20 +308,14 @@ impl PersistedTrigger {
         Self {
             enabled: trigger.enabled,
             actions: PersistedActions {
-                shock: PersistedShock::from_app(&trigger.actions.shock),
+                vibrate: PersistedVibrate::from_app(&trigger.actions),
             },
         }
     }
     fn to_app(&self) -> TriggerSettings {
         TriggerSettings {
             enabled: self.enabled,
-            actions: ActionSettings {
-                shock: self.actions.shock.to_app(),
-                // Vibrate settings are not persisted yet; they reset to
-                // their defaults on restart until PersistedActions gains a
-                // versioned `vibrate` field.
-                vibrate: crate::action::VibrateActionSettings::default(),
-            },
+            actions: self.actions.vibrate.to_app(),
         }
     }
 }
@@ -657,144 +365,103 @@ impl PersistedAbilityFilter {
         }
     }
 }
-impl PersistedShock {
-    fn from_app(shock: &ShockActionSettings) -> Self {
+impl PersistedVibrate {
+    fn from_app(vibrate: &VibrateActionSettings) -> Self {
         Self {
-            mode: shock.mode.into(),
-            interval: PersistedShockInterval {
-                minimum_intensity: shock.interval.minimum_intensity,
-                maximum_intensity: shock.interval.maximum_intensity,
-                minimum_duration_seconds: shock.interval.minimum_duration_seconds,
-                maximum_duration_seconds: shock.interval.maximum_duration_seconds,
+            mode: vibrate.mode.into(),
+            interval: PersistedVibrateInterval {
+                minimum_strength: vibrate.interval.minimum_strength,
+                maximum_strength: vibrate.interval.maximum_strength,
+                minimum_duration_seconds: vibrate.interval.minimum_duration_seconds,
+                maximum_duration_seconds: vibrate.interval.maximum_duration_seconds,
             },
-            fixed: PersistedShockFixed {
-                intensity: shock.fixed.intensity,
-                duration_seconds: shock.fixed.duration_seconds,
+            fixed: PersistedVibrateFixed {
+                strength: vibrate.fixed.strength,
+                duration_seconds: vibrate.fixed.duration_seconds,
             },
         }
     }
-    fn to_app(&self) -> ShockActionSettings {
-        ShockActionSettings {
+    fn to_app(&self) -> VibrateActionSettings {
+        VibrateActionSettings {
             mode: self.mode.into(),
-            interval: ShockIntervalSettings {
-                minimum_intensity: self.interval.minimum_intensity,
-                maximum_intensity: self.interval.maximum_intensity,
+            interval: VibrateIntervalSettings {
+                minimum_strength: self.interval.minimum_strength,
+                maximum_strength: self.interval.maximum_strength,
                 minimum_duration_seconds: self.interval.minimum_duration_seconds,
                 maximum_duration_seconds: self.interval.maximum_duration_seconds,
             },
-            fixed: ShockFixedSettings {
-                intensity: self.fixed.intensity,
+            fixed: VibrateFixedSettings {
+                strength: self.fixed.strength,
                 duration_seconds: self.fixed.duration_seconds,
             },
         }
     }
     fn normalize(&mut self) {
-        self.interval.minimum_intensity = normalize_value(
-            self.interval.minimum_intensity,
-            MIN_SHOCK_INTENSITY,
-            MAX_SHOCK_INTENSITY,
-            MIN_SHOCK_INTENSITY,
+        self.interval.minimum_strength = normalize_value(
+            self.interval.minimum_strength,
+            MIN_VIBRATE_STRENGTH,
+            MAX_VIBRATE_STRENGTH,
+            MIN_VIBRATE_STRENGTH,
         );
-        self.interval.maximum_intensity = normalize_value(
-            self.interval.maximum_intensity,
-            MIN_SHOCK_INTENSITY,
-            MAX_SHOCK_INTENSITY,
-            MIN_SHOCK_INTENSITY,
+        self.interval.maximum_strength = normalize_value(
+            self.interval.maximum_strength,
+            MIN_VIBRATE_STRENGTH,
+            MAX_VIBRATE_STRENGTH,
+            MIN_VIBRATE_STRENGTH,
         )
-        .max(self.interval.minimum_intensity);
-        self.fixed.intensity = normalize_value(
-            self.fixed.intensity,
-            MIN_SHOCK_INTENSITY,
-            MAX_SHOCK_INTENSITY,
-            MIN_SHOCK_INTENSITY,
+        .max(self.interval.minimum_strength);
+        self.fixed.strength = normalize_value(
+            self.fixed.strength,
+            MIN_VIBRATE_STRENGTH,
+            MAX_VIBRATE_STRENGTH,
+            MIN_VIBRATE_STRENGTH,
         );
         self.interval.minimum_duration_seconds = normalize_value(
             self.interval.minimum_duration_seconds,
-            MIN_SHOCK_DURATION,
-            MAX_SHOCK_DURATION,
-            MIN_SHOCK_DURATION,
+            MIN_VIBRATE_DURATION,
+            MAX_VIBRATE_DURATION,
+            MIN_VIBRATE_DURATION,
         );
         self.interval.maximum_duration_seconds = normalize_value(
             self.interval.maximum_duration_seconds,
-            MIN_SHOCK_DURATION,
-            MAX_SHOCK_DURATION,
-            MIN_SHOCK_DURATION,
+            MIN_VIBRATE_DURATION,
+            MAX_VIBRATE_DURATION,
+            MIN_VIBRATE_DURATION,
         )
         .max(self.interval.minimum_duration_seconds);
         self.fixed.duration_seconds = normalize_value(
             self.fixed.duration_seconds,
-            MIN_SHOCK_DURATION,
-            MAX_SHOCK_DURATION,
-            MIN_SHOCK_DURATION,
+            MIN_VIBRATE_DURATION,
+            MAX_VIBRATE_DURATION,
+            MIN_VIBRATE_DURATION,
         );
     }
 }
-impl From<ProviderKind> for PersistedProvider {
-    fn from(provider: ProviderKind) -> Self {
-        match provider {
-            ProviderKind::PiShock => Self::PiShock,
-            ProviderKind::OpenShock => Self::OpenShock,
-            ProviderKind::Lovense => Self::Lovense,
-        }
-    }
-}
-impl From<PersistedProvider> for ProviderKind {
-    fn from(provider: PersistedProvider) -> Self {
-        match provider {
-            PersistedProvider::PiShock => Self::PiShock,
-            PersistedProvider::OpenShock => Self::OpenShock,
-            PersistedProvider::Lovense => Self::Lovense,
-        }
-    }
-}
-impl From<ShockMode> for PersistedShockMode {
-    fn from(mode: ShockMode) -> Self {
+impl From<VibrateMode> for PersistedVibrateMode {
+    fn from(mode: VibrateMode) -> Self {
         match mode {
-            ShockMode::Interval => Self::Interval,
-            ShockMode::Fixed => Self::Fixed,
+            VibrateMode::Interval => Self::Interval,
+            VibrateMode::Fixed => Self::Fixed,
         }
     }
 }
-impl From<PersistedShockMode> for ShockMode {
-    fn from(mode: PersistedShockMode) -> Self {
+impl From<PersistedVibrateMode> for VibrateMode {
+    fn from(mode: PersistedVibrateMode) -> Self {
         match mode {
-            PersistedShockMode::Interval => Self::Interval,
-            PersistedShockMode::Fixed => Self::Fixed,
+            PersistedVibrateMode::Interval => Self::Interval,
+            PersistedVibrateMode::Fixed => Self::Fixed,
         }
     }
 }
 impl PersistedTarget {
     fn from_target_id(target: &TargetId) -> Self {
-        match target {
-            TargetId::PiShock(id) => Self {
-                provider: PersistedProvider::PiShock,
-                id: id.to_string(),
-            },
-            TargetId::OpenShock(id) => Self {
-                provider: PersistedProvider::OpenShock,
-                id: id.clone(),
-            },
-            TargetId::Lovense(id) => Self {
-                provider: PersistedProvider::Lovense,
-                id: id.clone(),
-            },
-        }
+        Self { id: target.clone() }
     }
     fn to_target_id(&self) -> Result<TargetId, String> {
-        match self.provider {
-            PersistedProvider::PiShock => {
-                self.id.parse::<u64>().map(TargetId::PiShock).map_err(|_| {
-                    "PiShock preferred target ID is not an unsigned integer".to_owned()
-                })
-            }
-            PersistedProvider::OpenShock if self.id.trim().is_empty() => {
-                Err("OpenShock preferred target ID is empty".to_owned())
-            }
-            PersistedProvider::OpenShock => Ok(TargetId::OpenShock(self.id.clone())),
-            PersistedProvider::Lovense if self.id.trim().is_empty() => {
-                Err("Lovense preferred target ID is empty".to_owned())
-            }
-            PersistedProvider::Lovense => Ok(TargetId::Lovense(self.id.clone())),
+        if self.id.trim().is_empty() {
+            Err("preferred target ID is empty".to_owned())
+        } else {
+            Ok(self.id.clone())
         }
     }
 }
@@ -865,26 +532,11 @@ pub(crate) fn load_from_path(path: &Path) -> LoadOutcome {
     let loaded = serde_json::from_str::<SchemaVersion>(&source)
         .map_err(|error| error.to_string())
         .and_then(|version| match version.schema_version {
-            1 => serde_json::from_str::<PersistedStateV1>(&source)
-                .map(|state| (PersistedState::from(state), true))
-                .map_err(|error| error.to_string()),
-            2 => serde_json::from_str::<PersistedStateV2>(&source)
-                .map(|state| (PersistedState::from(state), true))
-                .map_err(|error| error.to_string()),
-            3 => serde_json::from_str::<PersistedStateV3>(&source)
-                .map(|state| (PersistedState::from(state), true))
-                .map_err(|error| error.to_string()),
-            4 => serde_json::from_str::<PersistedStateV4>(&source)
-                .map(|state| (PersistedState::from(state), true))
-                .map_err(|error| error.to_string()),
-            5 => serde_json::from_str::<PersistedStateV5>(&source)
-                .map(|state| (PersistedState::from(state), true))
-                .map_err(|error| error.to_string()),
             SCHEMA_VERSION => serde_json::from_str::<PersistedState>(&source)
                 .map(|state| (state, false))
                 .map_err(|error| error.to_string()),
             unsupported => Err(format!(
-                "unsupported schema version {unsupported}; expected 1, 2, 3, 4, 5, or {SCHEMA_VERSION}"
+                "unsupported schema version {unsupported}; expected {SCHEMA_VERSION}"
             )),
         })
         .and_then(|(state, migrated)| state.normalized().map(|state| (state, migrated)));
@@ -1335,7 +987,7 @@ impl Persistence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::ShockMode;
+    use crate::action::VibrateMode;
     use crate::app::AbilityFilter;
     use std::collections::BTreeSet;
 
@@ -1358,180 +1010,32 @@ mod tests {
     }
 
     #[test]
-    fn schema_four_round_trip_preserves_provider_and_action_banks() {
-        let mut app = AppState::default();
-        app.provider = ProviderKind::OpenShock;
-        app.provider_settings.pishock.username = "pi-user".into();
-        app.provider_settings.pishock.api_key = "pi-key".into();
-        app.provider_settings.openshock.token = "open-token".into();
-        app.preferred_target = Some(TargetId::OpenShock("group-id".into()));
-        app.triggers.death.actions.shock.mode = ShockMode::Fixed;
-        app.triggers.death.actions.shock.fixed.intensity = 43.0;
-        app.triggers.ability_use.trigger.enabled = true;
-        app.triggers.ability_use.ability_filter = AbilityFilter::Selected(BTreeSet::from([1, 3]));
-        let persisted = PersistedState::from_app(&app);
-        assert_eq!(persisted.schema_version, SCHEMA_VERSION);
-        let restored =
-            serde_json::from_str::<PersistedState>(&serde_json::to_string(&persisted).unwrap())
-                .unwrap()
-                .restore_app();
-        assert_eq!(restored.provider, ProviderKind::OpenShock);
-        assert_eq!(restored.provider_settings, app.provider_settings);
-        assert_eq!(restored.preferred_target, app.preferred_target);
-        assert_eq!(
-            restored.triggers.death.actions.shock,
-            app.triggers.death.actions.shock
-        );
-        assert_eq!(
-            restored.triggers.ability_use.ability_filter,
-            app.triggers.ability_use.ability_filter
-        );
-    }
-
-    #[test]
-    fn schema_three_fixture_migrates_all_provider_and_action_profiles() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        std::fs::write(
-            &path,
-            include_str!("../fixtures/provider-foundation-schema3.json"),
-        )
-        .unwrap();
-        let outcome = load_from_path(&path);
-        assert!(outcome.migrated);
-        let restored = outcome.state.restore_app();
-        assert_eq!(restored.provider, ProviderKind::OpenShock);
-        assert_eq!(restored.provider_settings.pishock.api_key, "fixture-pi-key");
-        assert_eq!(
-            restored.provider_settings.openshock.token,
-            "fixture-open-token"
-        );
-        assert_eq!(
-            restored.preferred_target,
-            Some(TargetId::OpenShock("fixture-group".into()))
-        );
-        assert_eq!(restored.triggers.death.actions.shock.fixed.intensity, 33.0);
-        assert_eq!(
-            restored.triggers.ability_use.ability_filter,
-            AbilityFilter::Selected(BTreeSet::from([1, 3]))
-        );
-        assert_eq!(
-            restored
-                .triggers
-                .ability_cooldown_ready
-                .trigger
-                .actions
-                .shock
-                .fixed
-                .intensity,
-            66.0
-        );
-        assert_eq!(restored.log_path, "/fixture/console.log");
-        let (mut persistence, migrated) = Persistence::open(path.clone());
-        assert_eq!(persistence.pending, Some(migrated.clone()));
-        persistence.flush(migrated).unwrap();
-        let rewritten: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(rewritten["schema_version"], SCHEMA_VERSION);
-        assert_eq!(
-            rewritten["provider_settings"]["pishock"]["api_key"],
-            "fixture-pi-key"
-        );
-        assert_eq!(
-            rewritten["triggers"]["local_player_death"]["actions"]["shock"]["fixed"]["intensity"],
-            33.0
-        );
-    }
-
-    #[test]
-    fn normalization_is_independent_for_each_action_profile() {
-        let mut state = PersistedState::default();
-        state
-            .triggers
-            .local_player_death
-            .actions
-            .shock
-            .interval
-            .minimum_intensity = 120.0;
-        state
-            .triggers
-            .ability_used
-            .trigger
-            .actions
-            .shock
-            .fixed
-            .duration_seconds = 9.0;
-        state
-            .triggers
-            .ability_cooldown_ready
-            .trigger
-            .actions
-            .shock
-            .interval
-            .maximum_duration_seconds = 0.1;
-        let normalized = state.normalized().unwrap();
-        assert_eq!(
-            normalized
-                .triggers
-                .local_player_death
-                .actions
-                .shock
-                .interval
-                .minimum_intensity,
-            MAX_SHOCK_INTENSITY
-        );
-        assert_eq!(
-            normalized
-                .triggers
-                .ability_used
-                .trigger
-                .actions
-                .shock
-                .fixed
-                .duration_seconds,
-            MAX_SHOCK_DURATION
-        );
-        assert_eq!(
-            normalized
-                .triggers
-                .ability_cooldown_ready
-                .trigger
-                .actions
-                .shock
-                .interval
-                .maximum_duration_seconds,
-            MIN_SHOCK_DURATION
-        );
-    }
-    #[test]
-    fn schema_four_round_trip_preserves_all_setup_profiles_targets_filters_and_actions() {
+    fn round_trip_preserves_provider_target_filters_and_actions() {
         let mut original = AppState::default();
-        original.provider = ProviderKind::OpenShock;
-        original.provider_settings.pishock.username = "pi-user".to_owned();
-        original.provider_settings.pishock.api_key = "pi-key".to_owned();
-        original.provider_settings.openshock.token = "open-token".to_owned();
-        original.preferred_target = Some(TargetId::OpenShock("group-id".to_owned()));
+        original.provider_settings.lovense.domain = "192.168.1.2".to_owned();
+        original.provider_settings.lovense.http_port = 30010;
+        original.preferred_target = Some("toy-id".to_owned());
         original.triggers.death.enabled = false;
-        original.triggers.death.actions.shock.mode = ShockMode::Fixed;
-        original.triggers.death.actions.shock.fixed.intensity = 43.0;
-        original.triggers.death.actions.shock.fixed.duration_seconds = 1.4;
+        original.triggers.death.actions.mode = VibrateMode::Fixed;
+        original.triggers.death.actions.fixed.strength = 14.0;
+        original.triggers.death.actions.fixed.duration_seconds = 4.0;
+        original.triggers.kill.enabled = true;
+        original.triggers.assist.enabled = true;
         original.triggers.ability_use.trigger.enabled = true;
         original
             .triggers
             .ability_use
             .trigger
             .actions
-            .shock
             .interval
-            .minimum_intensity = 11.0;
+            .minimum_strength = 3.0;
         original
             .triggers
             .ability_use
             .trigger
             .actions
-            .shock
             .interval
-            .maximum_intensity = 72.0;
+            .maximum_strength = 12.0;
         original.triggers.ability_use.ability_filter =
             AbilityFilter::Selected(BTreeSet::from([1, 4]));
         original.triggers.ability_cooldown_ready.trigger.enabled = true;
@@ -1540,20 +1044,19 @@ mod tests {
             .ability_cooldown_ready
             .trigger
             .actions
-            .shock
             .fixed
-            .intensity = 87.0;
+            .strength = 9.0;
         original.triggers.ability_cooldown_ready.ability_filter = AbilityFilter::All;
         original.log_path = "/logs/console.log".to_owned();
         let persisted = PersistedState::from_app(&original);
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string_pretty(&persisted).unwrap()).unwrap();
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
-        assert_eq!(value["provider"], "openshock");
-        assert_eq!(value["preferred_target"]["id"], "group-id");
+        assert_eq!(value["provider_settings"]["lovense"]["domain"], "192.168.1.2");
+        assert_eq!(value["preferred_target"]["id"], "toy-id");
         assert_eq!(
-            value["triggers"]["local_player_death"]["actions"]["shock"]["fixed"]["intensity"],
-            43.0
+            value["triggers"]["local_player_death"]["actions"]["vibrate"]["fixed"]["strength"],
+            14.0
         );
         let restored = serde_json::from_value::<PersistedState>(value)
             .unwrap()
@@ -1567,198 +1070,64 @@ mod tests {
     }
 
     #[test]
-    fn schema_six_round_trip_preserves_kill_and_assist_settings() {
-        let mut app = AppState::default();
-        app.triggers.kill.enabled = true;
-        app.triggers.kill.actions.shock.mode = ShockMode::Fixed;
-        app.triggers.kill.actions.shock.fixed.intensity = 27.0;
-        app.triggers.assist.enabled = true;
-        app.triggers.assist.actions.shock.fixed.duration_seconds = 0.8;
-        let persisted = PersistedState::from_app(&app);
-        assert_eq!(persisted.schema_version, SCHEMA_VERSION);
-        let restored =
-            serde_json::from_str::<PersistedState>(&serde_json::to_string(&persisted).unwrap())
-                .unwrap()
-                .restore_app();
-        assert!(restored.triggers.kill.enabled);
+    fn normalization_is_independent_for_each_action_profile() {
+        let mut state = PersistedState::default();
+        state
+            .triggers
+            .local_player_death
+            .actions
+            .vibrate
+            .interval
+            .minimum_strength = 99.0;
+        state
+            .triggers
+            .ability_used
+            .trigger
+            .actions
+            .vibrate
+            .fixed
+            .duration_seconds = 90.0;
+        state
+            .triggers
+            .ability_cooldown_ready
+            .trigger
+            .actions
+            .vibrate
+            .interval
+            .maximum_duration_seconds = 0.1;
+        let normalized = state.normalized().unwrap();
         assert_eq!(
-            restored.triggers.kill.actions.shock,
-            app.triggers.kill.actions.shock
-        );
-        assert!(restored.triggers.assist.enabled);
-        assert_eq!(
-            restored.triggers.assist.actions.shock,
-            app.triggers.assist.actions.shock
-        );
-    }
-
-    #[test]
-    fn schema_five_migration_defaults_kill_and_assist_to_disabled() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        let shock = serde_json::json!({
-            "mode": "interval",
-            "interval": {
-                "minimum_intensity": 10.0,
-                "maximum_intensity": 20.0,
-                "minimum_duration_seconds": 0.2,
-                "maximum_duration_seconds": 0.5
-            },
-            "fixed": { "intensity": 15.0, "duration_seconds": 0.3 }
-        });
-        let schema_five = serde_json::json!({
-            "schema_version": 5,
-            "provider": "pishock",
-            "provider_settings": {
-                "pishock": { "username": "pi-user", "api_key": "pi-key" },
-                "openshock": { "token": "" },
-                "lovense": { "domain": "192.168.1.2", "http_port": 30010 }
-            },
-            "preferred_target": null,
-            "triggers": {
-                "local_player_death": {
-                    "enabled": true,
-                    "actions": { "shock": shock.clone() }
-                },
-                "ability_used": {
-                    "trigger": {
-                        "enabled": false,
-                        "actions": { "shock": shock.clone() }
-                    },
-                    "ability_filter": { "mode": "all", "slots": [] }
-                },
-                "ability_cooldown_ready": {
-                    "trigger": {
-                        "enabled": false,
-                        "actions": { "shock": shock.clone() }
-                    },
-                    "ability_filter": { "mode": "all", "slots": [] }
-                }
-            },
-            "log_path": ""
-        });
-        fs::write(&path, serde_json::to_vec_pretty(&schema_five).unwrap()).unwrap();
-        let outcome = load_from_path(&path);
-        assert!(outcome.migrated);
-        let restored = outcome.state.restore_app();
-        assert!(restored.triggers.death.enabled);
-        assert!(!restored.triggers.kill.enabled);
-        assert!(!restored.triggers.assist.enabled);
-        assert_eq!(
-            restored.triggers.kill.actions.shock,
-            restored.triggers.death.actions.shock
-        );
-    }
-
-    #[test]
-    fn schema_one_migration_clones_shock_and_preserves_legacy_behavior() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        let schema_one = serde_json::json!({
-            "schema_version": 1,
-            "provider": "openshock",
-            "credentials": {
-                "pishock": { "username": "pi-user", "api_key": "pi-key" },
-                "openshock": { "token": "open-token" }
-            },
-            "preferred_target": { "provider": "openshock", "id": "group-id" },
-            "shock": {
-                "mode": "fixed",
-                "interval": {
-                    "minimum_intensity": 11.0,
-                    "maximum_intensity": 72.0,
-                    "minimum_duration_seconds": 0.5,
-                    "maximum_duration_seconds": 2.6
-                },
-                "fixed": { "intensity": 43.0, "duration_seconds": 1.4 }
-            },
-            "log_path": "/logs/console.log"
-        });
-        fs::write(&path, serde_json::to_vec_pretty(&schema_one).unwrap()).unwrap();
-        let outcome = load_from_path(&path);
-        assert!(outcome.warning.is_none());
-        let restored = outcome.state.restore_app();
-        assert_eq!(restored.provider, ProviderKind::OpenShock);
-        assert_eq!(restored.provider_settings.pishock.username, "pi-user");
-        assert_eq!(restored.provider_settings.openshock.token, "open-token");
-        assert_eq!(
-            restored.preferred_target,
-            Some(TargetId::OpenShock("group-id".to_owned()))
-        );
-        assert_eq!(restored.triggers.death.actions.shock.mode, ShockMode::Fixed);
-        assert_eq!(restored.triggers.death.actions.shock.fixed.intensity, 43.0);
-        assert_eq!(
-            restored.triggers.ability_use.trigger.actions.shock,
-            restored.triggers.death.actions.shock
+            normalized
+                .triggers
+                .local_player_death
+                .actions
+                .vibrate
+                .interval
+                .minimum_strength,
+            MAX_VIBRATE_STRENGTH
         );
         assert_eq!(
-            restored
+            normalized
+                .triggers
+                .ability_used
+                .trigger
+                .actions
+                .vibrate
+                .fixed
+                .duration_seconds,
+            MAX_VIBRATE_DURATION
+        );
+        assert_eq!(
+            normalized
                 .triggers
                 .ability_cooldown_ready
                 .trigger
                 .actions
-                .shock,
-            restored.triggers.death.actions.shock
+                .vibrate
+                .interval
+                .maximum_duration_seconds,
+            MIN_VIBRATE_DURATION
         );
-        assert_eq!(restored.log_path, "/logs/console.log");
-        let (mut persistence, migrated) = Persistence::open(path.clone());
-        assert_eq!(persistence.pending, Some(migrated.clone()));
-        persistence.flush(migrated).unwrap();
-        let rewritten: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(rewritten["schema_version"], SCHEMA_VERSION);
-        assert!(rewritten.get("shock").is_none());
-        assert!(rewritten["triggers"]["local_player_death"]["actions"]["shock"].is_object());
-    }
-
-    #[test]
-    fn schema_two_migration_preserves_toggles_and_clones_shared_shock() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        let schema_two = serde_json::json!({
-            "schema_version": 2,
-            "provider": "pishock",
-            "credentials": {
-                "pishock": { "username": "pi-user", "api_key": "pi-key" },
-                "openshock": { "token": "open-token" }
-            },
-            "preferred_target": null,
-            "shock": {
-                "mode": "fixed",
-                "interval": {
-                    "minimum_intensity": 12.0,
-                    "maximum_intensity": 34.0,
-                    "minimum_duration_seconds": 0.7,
-                    "maximum_duration_seconds": 2.1
-                },
-                "fixed": { "intensity": 56.0, "duration_seconds": 1.8 }
-            },
-            "triggers": {
-                "local_player_death": false,
-                "ability_used": true,
-                "ability_cooldown_ready": true
-            },
-            "log_path": "/old/log"
-        });
-        fs::write(&path, serde_json::to_vec_pretty(&schema_two).unwrap()).unwrap();
-        let restored = load_from_path(&path).state.restore_app();
-        assert!(!restored.triggers.death.enabled);
-        assert!(restored.triggers.ability_use.trigger.enabled);
-        assert!(restored.triggers.ability_cooldown_ready.trigger.enabled);
-        assert_eq!(
-            restored.triggers.death.actions.shock,
-            restored.triggers.ability_use.trigger.actions.shock
-        );
-        assert_eq!(
-            restored.triggers.death.actions.shock,
-            restored
-                .triggers
-                .ability_cooldown_ready
-                .trigger
-                .actions
-                .shock
-        );
-        assert_eq!(restored.triggers.death.actions.shock.fixed.intensity, 56.0);
     }
 
     #[test]
@@ -1813,24 +1182,24 @@ mod tests {
             .triggers
             .local_player_death
             .actions
-            .shock
+            .vibrate
             .interval
-            .minimum_intensity = 120.0;
+            .minimum_strength = 99.0;
         state
             .triggers
             .local_player_death
             .actions
-            .shock
+            .vibrate
             .interval
-            .maximum_intensity = -5.0;
+            .maximum_strength = -5.0;
         state
             .triggers
             .ability_used
             .trigger
             .actions
-            .shock
+            .vibrate
             .fixed
-            .duration_seconds = 9.0;
+            .duration_seconds = 90.0;
         state.triggers.ability_used.ability_filter = PersistedAbilityFilter {
             mode: PersistedAbilityFilterMode::Selected,
             slots: vec![4, 0, 2, 4, 2],
@@ -1845,20 +1214,20 @@ mod tests {
                 .triggers
                 .local_player_death
                 .actions
-                .shock
+                .vibrate
                 .interval
-                .minimum_intensity,
-            MAX_SHOCK_INTENSITY
+                .minimum_strength,
+            MAX_VIBRATE_STRENGTH
         );
         assert_eq!(
             normalized
                 .triggers
                 .local_player_death
                 .actions
-                .shock
+                .vibrate
                 .interval
-                .maximum_intensity,
-            MAX_SHOCK_INTENSITY
+                .maximum_strength,
+            MAX_VIBRATE_STRENGTH
         );
         assert_eq!(
             normalized
@@ -1866,10 +1235,10 @@ mod tests {
                 .ability_used
                 .trigger
                 .actions
-                .shock
+                .vibrate
                 .fixed
                 .duration_seconds,
-            MAX_SHOCK_DURATION
+            MAX_VIBRATE_DURATION
         );
         assert_eq!(
             normalized.triggers.ability_used.ability_filter.slots,
