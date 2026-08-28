@@ -14,9 +14,9 @@ Huge shoutout to volc/bolc for creating the original DeadlockShock mod that Love
 
 This is an unofficial, third-party mod and companion app, not affiliated with or endorsed by Valve. Using client mods is against most games' terms of service in some form, and Deadlock is no exception. Use it at your own risk. I am not liable for any bans, suspensions, or other consequences you receive from using this software.
 
-## Getting Started (no coding required)
+## Getting Started
 
-You don't need to build anything or know how to code to use this. Here's everything, start to finish:
+Here's everything, start to finish:
 
 **What you need:**
 - [Deadlock](https://store.steampowered.com/app/1422450/Deadlock/) installed via Steam
