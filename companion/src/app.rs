@@ -13,7 +13,8 @@ use crate::bridge_listener::{
 use crate::deadlock_path::{self, Detection, DetectionError};
 use crate::logging::{LogSnapshot, LogStore};
 use crate::persistence::{PersistedState, Persistence, default_state_path};
-use crate::provider::{ConnectedProvider, ProviderError, ProviderSettings, ProviderTarget, TargetId};
+use crate::provider::{ProviderError, ProviderSettings, ProviderTarget, TargetId};
+use crate::providers::{ConnectedProvider, ProviderKind};
 use crate::version_check::{
     COMPANION_RELEASE_URL, LATEST_RELEASE_URL, MOD_RELEASE_URL, VersionCheckOwner,
     VersionCheckState, WarningSelection, app_version, select_warnings,
@@ -22,7 +23,6 @@ use egui::{Color32, TextEdit, Ui};
 
 pub(crate) const ACTION_QUEUE_CAPACITY: usize = 10;
 pub(crate) const MAX_ACTION_QUEUE_AGE: Duration = Duration::from_secs(30);
-const PROVIDER_LABEL: &str = "Lovense";
 const ACTION_KIND_LABEL: &str = "vibrate";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -169,6 +169,7 @@ type TestActionResult = Result<(), ProviderError>;
 fn provider_error_kind(error: &ProviderError) -> &'static str {
     match error {
         ProviderError::Lovense(_) => "lovense",
+        ProviderError::Buttplug(_) => "buttplug",
         ProviderError::InvalidSetup => "invalid_setup",
         ProviderError::NotConnected => "not_connected",
     }
@@ -337,8 +338,16 @@ impl TriggerIdentity {
     }
 
     fn status_description(&self) -> String {
-        if matches!(self.kind, TriggerKind::Death | TriggerKind::Kill | TriggerKind::Assist) {
-            return format!("{} {}#{}", self.kind.label(), self.session_id, self.sequence);
+        if matches!(
+            self.kind,
+            TriggerKind::Death | TriggerKind::Kill | TriggerKind::Assist
+        ) {
+            return format!(
+                "{} {}#{}",
+                self.kind.label(),
+                self.session_id,
+                self.sequence
+            );
         }
         let name = self
             .ability_name
@@ -447,17 +456,17 @@ impl ActionStatus {
         let trigger = snapshot.trigger.status_description();
         match self {
             Self::Sending(_) => {
-                format!("{PROVIDER_LABEL}: Sending {action} to {target} at {resolved} ({trigger})…")
+                format!("Sending {action} to {target} at {resolved} ({trigger})…")
             }
             Self::Sent(_) => {
-                format!("{PROVIDER_LABEL}: {action} sent to {target} at {resolved} ({trigger}).")
+                format!("{action} sent to {target} at {resolved} ({trigger}).")
             }
-            Self::Failed { error, .. } => format!(
-                "{PROVIDER_LABEL}: {action} failed for {target} at {resolved} ({trigger}): {error}"
-            ),
-            Self::Skipped { reason, .. } => format!(
-                "{PROVIDER_LABEL}: {action} skipped for {target} at {resolved} ({trigger}): {reason}"
-            ),
+            Self::Failed { error, .. } => {
+                format!("{action} failed for {target} at {resolved} ({trigger}): {error}")
+            }
+            Self::Skipped { reason, .. } => {
+                format!("{action} skipped for {target} at {resolved} ({trigger}): {reason}")
+            }
         }
     }
     fn color(&self) -> [f32; 4] {
@@ -494,6 +503,7 @@ fn spawn_action_worker() -> (SyncSender<ActionJob>, Receiver<ActionCompletion>) 
 
 pub struct AppState {
     pub provider_settings: ProviderSettings,
+    pub selected_provider: ProviderKind,
     pub credential_state: CredentialState,
     pub devices: Vec<ProviderTarget>,
     pub selected_device: Option<TargetId>,
@@ -504,6 +514,9 @@ pub struct AppState {
     connection_error: Option<String>,
     connection_result: Option<Receiver<ConnectionResult>>,
     device_refresh_result: Option<Receiver<Result<Vec<ProviderTarget>, ProviderError>>>,
+    scan_result: Option<Receiver<Result<(), ProviderError>>>,
+    scan_refresh_result: Option<Receiver<Result<Vec<ProviderTarget>, ProviderError>>>,
+    scanning: bool,
     test_action_result: Option<Receiver<TestActionResult>>,
     test_action_status: Option<TestActionStatus>,
     action_sender: SyncSender<ActionJob>,
@@ -515,6 +528,7 @@ pub struct AppState {
     bridge_events: Option<Receiver<BridgeEvent>>,
     last_bridge_event: Option<BridgeEvent>,
     last_sequence: Option<(String, u64)>,
+    last_scan_refresh: Option<std::time::Instant>,
     ability_catalog: BTreeMap<u32, Option<String>>,
     listener_action_error: Option<String>,
     selected_section: AppSection,
@@ -527,6 +541,7 @@ impl Default for AppState {
         let (action_sender, action_result) = spawn_action_worker();
         Self {
             provider_settings: ProviderSettings::default(),
+            selected_provider: ProviderKind::Lovense,
             credential_state: CredentialState::default(),
             devices: Vec::new(),
             selected_device: None,
@@ -537,6 +552,9 @@ impl Default for AppState {
             connection_error: None,
             connection_result: None,
             device_refresh_result: None,
+            scan_result: None,
+            scan_refresh_result: None,
+            scanning: false,
             test_action_result: None,
             test_action_status: None,
             action_sender,
@@ -548,6 +566,7 @@ impl Default for AppState {
             bridge_events: None,
             last_bridge_event: None,
             last_sequence: None,
+            last_scan_refresh: None,
             ability_catalog: BTreeMap::new(),
             listener_action_error: None,
             selected_section: AppSection::default(),
@@ -595,6 +614,7 @@ impl AppState {
         self.bridge_listener.stop();
         self.reset_connection();
         self.provider_settings = ProviderSettings::default();
+        self.selected_provider = self.provider_settings.kind();
         self.preferred_target = None;
         self.triggers = TriggerSettingsSet::default();
         self.log_path.clear();
@@ -611,7 +631,7 @@ impl AppState {
         self.copy_feedback = None;
         self.action_status = None;
         self.action_in_flight = 0;
-        log::info!(target: "companion::app", "settings_reset_applied provider={PROVIDER_LABEL}");
+        log::info!(target: "companion::app", "settings_reset_applied provider={provider}", provider = self.provider_settings.kind().log_label());
         true
     }
     #[cfg(test)]
@@ -634,34 +654,157 @@ impl AppState {
                 Ok(client) => match client.disconnect() {
                     Ok(()) => log::info!(
                         target: "companion::app",
-                        "provider_disconnected provider={PROVIDER_LABEL} outcome=success"
+                        "provider_disconnected provider={provider} outcome=success",
+                        provider = self.provider_settings.kind().log_label()
                     ),
                     Err(error) => log::warn!(
                         target: "companion::app",
-                        "provider_disconnected provider={PROVIDER_LABEL} outcome=failed error_kind={}",
-                        provider_error_kind(&error)
+                    "provider_disconnected provider={provider} outcome=failed error_kind={}",
+                    provider_error_kind(&error),
+                    provider = self.provider_settings.kind().log_label()
                     ),
                 },
                 Err(_) => log::debug!(
                     target: "companion::app",
-                    "provider_disconnect_skipped provider={PROVIDER_LABEL} reason=shared_client"
+                    "provider_disconnect_skipped provider={provider} reason=shared_client",
+                    provider = self.provider_settings.kind().log_label()
                 ),
             }
         }
         self.credential_state = CredentialState::Unknown;
         self.connection_result = None;
         self.device_refresh_result = None;
+        self.scan_result = None;
+        self.scan_refresh_result = None;
+        self.scanning = false;
+        self.last_scan_refresh = None;
         self.devices.clear();
         self.selected_device = None;
         self.connection_error = None;
         self.test_action_result = None;
         self.test_action_status = None;
     }
+    fn select_provider(&mut self, kind: ProviderKind) {
+        if kind == self.provider_settings.kind() {
+            self.selected_provider = kind;
+            return;
+        }
+        self.selected_provider = kind;
+        self.provider_settings = match (kind, &self.provider_settings) {
+            (ProviderKind::Lovense, ProviderSettings::Lovense(_)) => self.provider_settings.clone(),
+            (ProviderKind::Lovense, _) => ProviderSettings::Lovense(Default::default()),
+            (ProviderKind::Local, _) => ProviderSettings::Local(Default::default()),
+            (ProviderKind::Intiface, ProviderSettings::Intiface(_)) => {
+                self.provider_settings.clone()
+            }
+            (ProviderKind::Intiface, _) => ProviderSettings::Intiface(Default::default()),
+        };
+        self.reset_connection();
+    }
+    fn start_scanning(&mut self, context: Option<egui::Context>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel::<Result<(), ProviderError>>();
+        self.scan_result = Some(receiver);
+        self.scanning = true;
+        self.last_scan_refresh = None;
+        thread::spawn(move || {
+            let result = client.start_scanning();
+            let _ = sender.send(result);
+            if let Some(ctx) = context {
+                ctx.request_repaint();
+            }
+        });
+    }
+    fn stop_scanning(&mut self, context: Option<egui::Context>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel::<Result<(), ProviderError>>();
+        self.scan_result = Some(receiver);
+        self.scanning = false;
+        self.last_scan_refresh = None;
+        thread::spawn(move || {
+            let result = client.stop_scanning();
+            let _ = sender.send(result);
+            if let Some(ctx) = context {
+                ctx.request_repaint();
+            }
+        });
+    }
+    fn poll_scan(&mut self) {
+        let Some(receiver) = &self.scan_result else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.scan_result = None;
+                match result {
+                    Ok(()) => {
+                        if let Some(client) = &self.client {
+                            match client.list_targets() {
+                                Ok(devices) => self.apply_devices(devices),
+                                Err(error) => self.connection_error = Some(error.user_message()),
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.connection_error = Some(error.user_message());
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.scan_result = None,
+        }
+    }
+    fn auto_refresh_scanning_devices(&mut self, ctx: egui::Context) {
+        if !self.scanning || self.client.is_none() {
+            self.last_scan_refresh = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        let should_refresh = match self.last_scan_refresh {
+            Some(last) => now.duration_since(last) >= std::time::Duration::from_secs(2),
+            None => true,
+        };
+        if !should_refresh {
+            return;
+        }
+        self.last_scan_refresh = Some(now);
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.scan_refresh_result = Some(receiver);
+        thread::spawn(move || {
+            let _ = sender.send(client.list_targets());
+            ctx.request_repaint();
+        });
+    }
+    fn poll_scan_refresh(&mut self) {
+        let Some(receiver) = &self.scan_refresh_result else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(devices)) => {
+                self.scan_refresh_result = None;
+                self.apply_devices(devices);
+            }
+            Ok(Err(error)) => {
+                self.scan_refresh_result = None;
+                self.connection_error = Some(error.user_message());
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.scan_refresh_result = None,
+        }
+    }
     fn start_connection_test(&mut self, context: egui::Context) {
-        let config = self.provider_settings.lovense.normalized();
+        let config = self.provider_settings.clone();
         log::info!(
             target: "companion::app",
-            "connection_test_started provider={PROVIDER_LABEL}"
+            "connection_test_started provider={provider}",
+            provider = self.provider_settings.kind().log_label()
         );
         self.reset_connection();
         let (sender, receiver) = mpsc::channel();
@@ -669,7 +812,7 @@ impl AppState {
         self.connection_error = None;
         self.connection_result = Some(receiver);
         thread::spawn(move || {
-            let result = ConnectedProvider::connect(&config).and_then(|client| {
+            let result = crate::providers::connect(&config).and_then(|client| {
                 let devices = client.list_targets()?;
                 Ok((client, devices))
             });
@@ -690,7 +833,8 @@ impl AppState {
             Err(TryRecvError::Disconnected) => {
                 log::error!(
                     target: "companion::app",
-                    "connection_worker_failed provider={PROVIDER_LABEL} reason=channel_closed"
+                    "connection_worker_failed provider={provider} reason=channel_closed",
+                    provider = self.provider_settings.kind().log_label()
                 );
                 self.connection_result = None;
                 self.apply_connection_error(ProviderError::NotConnected);
@@ -703,7 +847,7 @@ impl AppState {
             log::warn!(target: "companion::app", "device_refresh_skipped outcome=skipped error_kind=not_connected");
             return;
         };
-        log::info!(target: "companion::app", "device_refresh_started provider={PROVIDER_LABEL}");
+        log::info!(target: "companion::app", "device_refresh_started provider={provider}", provider = self.provider_settings.kind().log_label());
         let (sender, receiver) = mpsc::channel();
         self.device_refresh_result = Some(receiver);
         thread::spawn(move || {
@@ -721,8 +865,9 @@ impl AppState {
                 self.device_refresh_result = None;
                 log::info!(
                     target: "companion::app",
-                    "device_refresh_succeeded provider={PROVIDER_LABEL} targets={}",
-                    devices.len()
+                    "device_refresh_succeeded provider={provider} targets={}",
+                    devices.len(),
+                    provider = self.provider_settings.kind().log_label()
                 );
                 self.apply_devices(devices);
             }
@@ -730,8 +875,9 @@ impl AppState {
                 self.device_refresh_result = None;
                 log::warn!(
                     target: "companion::app",
-                    "device_refresh_failed provider={PROVIDER_LABEL} error_kind={}",
-                    provider_error_kind(&error)
+                    "device_refresh_failed provider={provider} error_kind={}",
+                    provider_error_kind(&error),
+                    provider = self.provider_settings.kind().log_label()
                 );
                 self.connection_error = Some(error.user_message());
             }
@@ -739,7 +885,8 @@ impl AppState {
             Err(TryRecvError::Disconnected) => {
                 log::error!(
                     target: "companion::app",
-                    "device_refresh_worker_failed provider={PROVIDER_LABEL} reason=channel_closed"
+                    "device_refresh_worker_failed provider={provider} reason=channel_closed",
+                    provider = self.provider_settings.kind().log_label()
                 );
                 self.device_refresh_result = None;
             }
@@ -751,17 +898,22 @@ impl AppState {
             Ok((client, devices)) => {
                 log::info!(
                     target: "companion::app",
-                    "connection_test_succeeded provider={PROVIDER_LABEL} targets={}",
-                    devices.len()
+                    "connection_test_succeeded provider={provider} targets={}",
+                    devices.len(),
+                    provider = self.provider_settings.kind().log_label()
                 );
                 self.client = Some(Arc::new(client));
                 self.apply_devices(devices);
+                if self.selected_provider == ProviderKind::Local && !self.scanning {
+                    self.start_scanning(None);
+                }
             }
             Err(error) => {
                 log::warn!(
                     target: "companion::app",
-                    "connection_test_failed provider={PROVIDER_LABEL} error_kind={}",
-                    provider_error_kind(&error)
+                    "connection_test_failed provider={provider} error_kind={}",
+                    provider_error_kind(&error),
+                    provider = self.provider_settings.kind().log_label()
                 );
                 self.apply_connection_error(error);
             }
@@ -808,8 +960,9 @@ impl AppState {
         let target = self.selected_device().cloned();
         log::info!(
             target: "companion::app",
-            "test_action_started outcome=started provider={PROVIDER_LABEL} target={:?}",
-            target.as_ref().map(ProviderTarget::id)
+            "test_action_started outcome=started provider={provider} target={:?}",
+            target.as_ref().map(ProviderTarget::id),
+            provider = self.provider_settings.kind().log_label()
         );
         let (sender, receiver) = mpsc::channel();
         self.test_action_status = Some(TestActionStatus::Sending);
@@ -820,7 +973,6 @@ impl AppState {
             context.request_repaint();
         });
     }
-
 
     fn poll_test_action(&mut self) {
         let Some(receiver) = &self.test_action_result else {
@@ -911,13 +1063,14 @@ impl AppState {
                         ActionCompletionResult::Skipped { reason } => {
                             log::warn!(
                                 target: "companion::app",
-                                "action_skipped outcome=skipped error_kind=none trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason={}",
+                                "action_skipped outcome=skipped error_kind=none trigger={} provider={provider} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason={}",
                                 trigger.kind.label(),
                                 completion.request.target.as_ref().map(ProviderTarget::id),
                                 action_summary,
                                 trigger.session_id,
                                 trigger.sequence,
-                                reason
+                                reason,
+                                provider = self.provider_settings.kind().log_label()
                             );
                             self.action_status = Some(ActionStatus::Skipped {
                                 snapshot: ActionSnapshot::from_request(&completion.request),
@@ -927,25 +1080,27 @@ impl AppState {
                         ActionCompletionResult::Completed(Ok(())) => {
                             log::info!(
                                 target: "companion::app",
-                                "action_sent outcome=sent error_kind=none trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={}",
+                                "action_sent outcome=sent error_kind=none trigger={} provider={provider} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={}",
                                 trigger.kind.label(),
                                 completion.request.target.as_ref().map(ProviderTarget::id),
                                 action_summary,
                                 trigger.session_id,
-                                trigger.sequence
+                                trigger.sequence,
+                                provider = self.provider_settings.kind().log_label()
                             );
                             self.action_status = Some(ActionStatus::Sent(completion.request));
                         }
                         ActionCompletionResult::Completed(Err(error)) => {
                             log::warn!(
                                 target: "companion::app",
-                                "action_failed outcome=failed trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} error_kind={}",
+                                "action_failed outcome=failed trigger={} provider={provider} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} error_kind={}",
                                 trigger.kind.label(),
                                 completion.request.target.as_ref().map(ProviderTarget::id),
                                 action_summary,
                                 trigger.session_id,
                                 trigger.sequence,
-                                provider_error_kind(&error)
+                                provider_error_kind(&error),
+                                provider = self.provider_settings.kind().log_label()
                             );
                             self.action_status = Some(ActionStatus::Failed {
                                 request: completion.request,
@@ -975,11 +1130,12 @@ impl AppState {
         {
             log::debug!(
                 target: "companion::app",
-                "action_skipped outcome=skipped error_kind=duplicate_or_out_of_order trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} session={} sequence={}",
+                "action_skipped outcome=skipped error_kind=duplicate_or_out_of_order trigger={} provider={provider} target={:?} action_kind={ACTION_KIND_LABEL} session={} sequence={}",
                 trigger.kind.label(),
                 self.selected_device().map(ProviderTarget::id),
                 trigger.session_id,
-                trigger.sequence
+                trigger.sequence,
+                provider = self.provider_settings.kind().log_label()
             );
             return false;
         }
@@ -995,23 +1151,25 @@ impl AppState {
                 self.action_in_flight = self.action_in_flight.saturating_add(1);
                 log::info!(
                     target: "companion::app",
-                    "action_queued outcome=queued error_kind=none trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={}",
+                    "action_queued outcome=queued error_kind=none trigger={} provider={provider} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={}",
                     trigger.kind.label(),
                     request.target.as_ref().map(ProviderTarget::id),
                     request.resolved.summary(),
                     trigger.session_id,
-                    trigger.sequence
+                    trigger.sequence,
+                    provider = self.provider_settings.kind().log_label()
                 );
             }
             ActionEnqueueResult::Full => {
                 log::warn!(
                     target: "companion::app",
-                    "action_skipped outcome=skipped error_kind=none trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason=queue_capacity",
+                    "action_skipped outcome=skipped error_kind=none trigger={} provider={provider} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason=queue_capacity",
                     trigger.kind.label(),
                     request.target.as_ref().map(ProviderTarget::id),
                     request.resolved.summary(),
                     trigger.session_id,
-                    trigger.sequence
+                    trigger.sequence,
+                    provider = self.provider_settings.kind().log_label()
                 );
                 self.action_status = Some(ActionStatus::Skipped {
                     snapshot: ActionSnapshot::from_request(&request),
@@ -1021,12 +1179,13 @@ impl AppState {
             ActionEnqueueResult::Disconnected => {
                 log::error!(
                     target: "companion::app",
-                    "action_failed outcome=failed trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason=worker_unavailable error_kind=worker_unavailable",
+                    "action_failed outcome=failed trigger={} provider={provider} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason=worker_unavailable error_kind=worker_unavailable",
                     trigger.kind.label(),
                     request.target.as_ref().map(ProviderTarget::id),
                     request.resolved.summary(),
                     trigger.session_id,
-                    trigger.sequence
+                    trigger.sequence,
+                    provider = self.provider_settings.kind().log_label()
                 );
                 self.action_status = Some(ActionStatus::Failed {
                     request,
@@ -1076,12 +1235,13 @@ impl AppState {
             Err(error) => {
                 log::warn!(
                     target: "companion::app",
-                    "action_skipped outcome=skipped trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} session={} sequence={} reason=invalid_settings error_kind=invalid_settings validation={}",
+                    "action_skipped outcome=skipped trigger={} provider={provider} target={:?} action_kind={ACTION_KIND_LABEL} session={} sequence={} reason=invalid_settings error_kind=invalid_settings validation={}",
                     trigger.kind.label(),
                     target.as_ref().map(ProviderTarget::id),
                     trigger.session_id,
                     trigger.sequence,
-                    error
+                    error,
+                    provider = self.provider_settings.kind().log_label()
                 );
                 self.action_status = Some(ActionStatus::Skipped {
                     snapshot: ActionSnapshot {
@@ -1103,12 +1263,13 @@ impl AppState {
         let Some(client) = self.client.clone() else {
             log::warn!(
                 target: "companion::app",
-                "action_skipped outcome=skipped trigger={} provider={PROVIDER_LABEL} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason=provider_not_connected error_kind=not_connected",
+                "action_skipped outcome=skipped trigger={} provider={provider} target={:?} action_kind={ACTION_KIND_LABEL} action_summary={:?} session={} sequence={} reason=provider_not_connected error_kind=not_connected",
                 request.trigger.kind.label(),
                 request.target.as_ref().map(ProviderTarget::id),
                 request.resolved.summary(),
                 request.trigger.session_id,
-                request.trigger.sequence
+                request.trigger.sequence,
+                provider = self.provider_settings.kind().log_label()
             );
             self.action_status = Some(ActionStatus::Skipped {
                 snapshot: ActionSnapshot::from_request(&request),
@@ -1403,9 +1564,12 @@ impl AppState {
         self.poll_test_action();
         self.poll_connection_test();
         self.poll_device_refresh();
+        self.poll_scan();
+        self.poll_scan_refresh();
         self.poll_action();
         self.poll_bridge_events();
         let busy = self.is_busy();
+        self.auto_refresh_scanning_devices(ui.ctx().clone());
 
         ui.horizontal(|ui| {
             for section in [
@@ -1418,17 +1582,18 @@ impl AppState {
                 ui.vertical(|ui| {
                     let wing_top = ui.cursor().top();
                     ui.add_space(8.0);
-                    let button = egui::Button::new(crate::theme::heading_text(section.label(), 16.0))
-                        .fill(if selected {
-                            crate::theme::ACCENT_DIM
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        })
-                        .stroke(if selected {
-                            egui::Stroke::new(1.0, crate::theme::ACCENT)
-                        } else {
-                            egui::Stroke::NONE
-                        });
+                    let button =
+                        egui::Button::new(crate::theme::heading_text(section.label(), 16.0))
+                            .fill(if selected {
+                                crate::theme::ACCENT_DIM
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            })
+                            .stroke(if selected {
+                                egui::Stroke::new(1.0, crate::theme::ACCENT)
+                            } else {
+                                egui::Stroke::NONE
+                            });
                     let response = ui.add(button);
                     if selected {
                         let center_x = response.rect.center().x;
@@ -1479,79 +1644,196 @@ impl AppState {
                     crate::theme::ACCENT,
                     4.0,
                 );
-                ui.label(crate::theme::heading_text("Lovense connection", 19.0));
+                ui.label(crate::theme::heading_text("Provider", 19.0));
             });
             ui.add_space(4.0);
-            ui.label(
-                "This connects the companion to the Lovense Remote app on your PC, which talks to your toy. Most people won't need to change any settings here.",
-            );
+            ui.label("Choose how the companion talks to your toys.");
             ui.add_space(14.0);
 
-            ui.label(egui::RichText::new("1. Open the Lovense Remote app").strong());
-            ui.small("Make sure your toy already shows as connected in it.");
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new("2. Turn on Game Mode").strong());
-            ui.small(
-                "Find it in the Remote app's menu. This lets other apps, like this one, send vibration commands to your toy.",
-            );
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new("3. Test the connection").strong());
-            ui.small("Click the button below \u{2014} you're done once it says \u{201c}Connected\u{201d}.");
-            ui.add_space(14.0);
-
-            let can_test = self.credentials_present() && !busy;
-            if ui
-                .add_enabled(
-                    can_test,
-                    egui::Button::new(egui::RichText::new("Test connection").size(15.0))
-                        .min_size(egui::vec2(ui.available_width(), 34.0)),
-                )
-                .clicked()
-            {
-                self.start_connection_test(ui.ctx().clone());
+            ui.add_enabled_ui(!busy, |ui| {
+                egui::ComboBox::from_id_salt("provider")
+                    .selected_text(self.selected_provider.label())
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for kind in [
+                            ProviderKind::Lovense,
+                            ProviderKind::Local,
+                            ProviderKind::Intiface,
+                        ] {
+                            ui.selectable_value(&mut self.selected_provider, kind, kind.label());
+                        }
+                    });
+            });
+            if self.selected_provider != self.provider_settings.kind() {
+                self.select_provider(self.selected_provider);
             }
+            ui.add_space(14.0);
+
+            match self.selected_provider {
+                ProviderKind::Lovense => self.draw_lovense_fields(ui, busy),
+                ProviderKind::Local => self.draw_local_fields(ui, busy),
+                ProviderKind::Intiface => self.draw_intiface_fields(ui, busy),
+            }
+
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                crate::theme::badge(ui, self.credential_state.label(), self.credential_state.tone());
+                crate::theme::badge(
+                    ui,
+                    self.credential_state.label(),
+                    self.credential_state.tone(),
+                );
                 if let Some(error) = &self.connection_error {
                     crate::theme::badge(ui, error, crate::theme::BadgeTone::Danger);
                 }
             });
+        });
+    }
 
-            ui.add_space(14.0);
-            ui.separator();
-            ui.add_space(8.0);
-            let mut credentials_changed = false;
-            egui::CollapsingHeader::new("Advanced: custom domain / port")
-                .id_salt("lovense-advanced")
-                .show(ui, |ui| {
-                    ui.add_space(4.0);
-                    ui.small(
-                        "Only needed if your toy connects through Lovense Remote on your phone instead of this PC. The app's Game Mode screen shows the domain and port to enter here.",
-                    );
-                    ui.add_space(8.0);
-                    ui.add_enabled_ui(!busy, |ui| {
-                        credentials_changed |= text_input(
-                            ui,
-                            "Domain",
-                            &mut self.provider_settings.lovense.domain,
-                            false,
-                        );
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.label("HTTP port");
-                            credentials_changed |= ui
-                                .add(egui::DragValue::new(
-                                    &mut self.provider_settings.lovense.http_port,
-                                ))
-                                .changed();
-                        });
+    fn draw_lovense_fields(&mut self, ui: &mut Ui, busy: bool) {
+        ui.label(crate::theme::heading_text("Lovense connection", 19.0));
+        ui.add_space(4.0);
+        ui.label(
+            "This connects the companion to the Lovense Remote app on your PC, which talks to your toy. Most people won't need to change any settings here.",
+        );
+        ui.add_space(14.0);
+
+        ui.label(egui::RichText::new("1. Open the Lovense Remote app").strong());
+        ui.small("Make sure your toy already shows as connected in it.");
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("2. Turn on Game Mode").strong());
+        ui.small(
+            "Find it in the Remote app's menu. This lets other apps, like this one, send vibration commands to your toy.",
+        );
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("3. Test the connection").strong());
+        ui.small(
+            "Click the button below \u{2014} you're done once it says \u{201c}Connected\u{201d}.",
+        );
+        ui.add_space(14.0);
+
+        let can_test = self.credentials_present() && !busy;
+        if ui
+            .add_enabled(
+                can_test,
+                egui::Button::new(egui::RichText::new("Test connection").size(15.0))
+                    .min_size(egui::vec2(ui.available_width(), 34.0)),
+            )
+            .clicked()
+        {
+            self.start_connection_test(ui.ctx().clone());
+        }
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(8.0);
+        let mut credentials_changed = false;
+        egui::CollapsingHeader::new("Advanced: custom domain / port")
+            .id_salt("lovense-advanced")
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.small(
+                    "Only needed if your toy connects through Lovense Remote on your phone instead of this PC. The app's Game Mode screen shows the domain and port to enter here.",
+                );
+                ui.add_space(8.0);
+                ui.add_enabled_ui(!busy, |ui| {
+                    let setup = self.provider_settings.lovense_mut();
+                    credentials_changed |= text_input(ui, "Domain", &mut setup.domain, false);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("HTTP port");
+                        credentials_changed |= ui
+                            .add(egui::DragValue::new(&mut setup.http_port))
+                            .changed();
                     });
                 });
-            if credentials_changed {
+            });
+        if credentials_changed {
+            self.reset_connection();
+        }
+    }
+
+    fn draw_local_fields(&mut self, ui: &mut Ui, busy: bool) {
+        ui.label(crate::theme::heading_text(
+            "Local (Embedded Intiface)",
+            19.0,
+        ));
+        ui.add_space(4.0);
+        ui.label(
+            "Runs a built-in buttplug engine inside the companion, so no separate Intiface Central is needed. Connect first, then toggle scanning on to find your toys.",
+        );
+        ui.add_space(14.0);
+
+        let connected = self.client.is_some() && !busy;
+        let engine_label = if connected {
+            "Stop / disconnect embedded engine"
+        } else {
+            "Start embedded engine"
+        };
+        if ui
+            .add_enabled(
+                !busy,
+                egui::Button::new(egui::RichText::new(engine_label).size(15.0))
+                    .min_size(egui::vec2(ui.available_width(), 34.0)),
+            )
+            .clicked()
+        {
+            if connected {
+                self.reset_connection();
+            } else {
+                self.start_connection_test(ui.ctx().clone());
+            }
+        }
+        ui.add_space(10.0);
+
+        let toggle_enabled = connected;
+        let toggle_label = if self.scanning {
+            "Stop scanning"
+        } else {
+            "Start scanning for toys"
+        };
+        if ui
+            .add_enabled(
+                toggle_enabled,
+                egui::Button::new(egui::RichText::new(toggle_label).size(15.0))
+                    .min_size(egui::vec2(ui.available_width(), 34.0)),
+            )
+            .clicked()
+        {
+            if self.scanning {
+                self.stop_scanning(Some(ui.ctx().clone()));
+            } else {
+                self.start_scanning(Some(ui.ctx().clone()));
+            }
+        }
+    }
+
+    fn draw_intiface_fields(&mut self, ui: &mut Ui, busy: bool) {
+        ui.label(crate::theme::heading_text("Intiface Central", 19.0));
+        ui.add_space(4.0);
+        ui.label(
+            "Connect to an externally running Intiface Central (or any buttplug WebSocket server). Start the server in Intiface Central, then enter its address below and test the connection.",
+        );
+        ui.add_space(14.0);
+
+        ui.add_enabled_ui(!busy, |ui| {
+            let setup = self.provider_settings.intiface_mut();
+            let changed = text_input(ui, "WebSocket URL", &mut setup.websocket_url, false);
+            if changed {
                 self.reset_connection();
             }
         });
+        ui.add_space(10.0);
+
+        let can_test = self.credentials_present() && !busy;
+        if ui
+            .add_enabled(
+                can_test,
+                egui::Button::new(egui::RichText::new("Test connection").size(15.0))
+                    .min_size(egui::vec2(ui.available_width(), 34.0)),
+            )
+            .clicked()
+        {
+            self.start_connection_test(ui.ctx().clone());
+        }
     }
 
     fn draw_toy_card(&mut self, ui: &mut Ui, busy: bool) {
@@ -1697,15 +1979,24 @@ impl AppState {
                         // Text fills the remaining space to the left of the controls.
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                             ui.vertical(|ui| {
-                                ui.label(crate::theme::heading_text(trigger_display_label(kind), 18.0));
+                                ui.label(crate::theme::heading_text(
+                                    trigger_display_label(kind),
+                                    18.0,
+                                ));
                                 if enabled {
                                     ui.colored_label(
                                         crate::theme::ACCENT_BRIGHT,
-                                        format!("{} mode", self.triggers.get(kind).actions.mode.label()),
+                                        format!(
+                                            "{} mode",
+                                            self.triggers.get(kind).actions.mode.label()
+                                        ),
                                     );
                                 }
                                 ui.horizontal(|ui| {
-                                    ui.colored_label(crate::theme::ACCENT, egui_phosphor::regular::HEART);
+                                    ui.colored_label(
+                                        crate::theme::ACCENT,
+                                        egui_phosphor::regular::HEART,
+                                    );
                                     ui.small(summary.clone());
                                 });
                             });
@@ -1727,8 +2018,7 @@ impl AppState {
                 configure_clicked = true;
             }
             if card_response.hovered() {
-                ui.ctx()
-                    .set_cursor_icon(egui::CursorIcon::PointingHand);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             if configure_clicked {
                 self.select_effect(kind);
@@ -1834,7 +2124,6 @@ impl AppState {
                 crate::action_ui::draw_vibrate_settings_editor(ui, &mut trigger.actions);
             });
         });
-
     }
 
     fn draw_ability_filter(&mut self, ui: &mut Ui, kind: TriggerKind, busy: bool) {
@@ -1958,7 +2247,10 @@ impl AppState {
     fn draw_game_connection(&mut self, ui: &mut Ui) {
         crate::theme::card(ui).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.colored_label(crate::theme::ACCENT, egui_phosphor::regular::PLUGS_CONNECTED);
+                ui.colored_label(
+                    crate::theme::ACCENT,
+                    egui_phosphor::regular::PLUGS_CONNECTED,
+                );
                 ui.label(crate::theme::heading_text("Game connection", 19.0));
             });
             ui.small("Deadlock must be launched with -condebug so it writes console.log.");
@@ -2052,7 +2344,7 @@ impl CompanionApp {
         // reconnected every time the app is opened, even though everything
         // needed to do so automatically is already saved.
         if app.state.credentials_present() {
-            log::info!(target: "companion::app", "startup_connection_attempt provider={PROVIDER_LABEL}");
+            log::info!(target: "companion::app", "startup_connection_attempt provider={provider}", provider = app.state.provider_settings.kind().log_label());
             app.state.start_connection_test(context);
         }
         app
@@ -2193,7 +2485,8 @@ impl CompanionApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
                     if drag_response.double_clicked() {
-                        let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+                        let maximized =
+                            ctx.input(|input| input.viewport().maximized.unwrap_or(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                     }
 
@@ -2526,9 +2819,10 @@ fn trigger_icon(kind: TriggerKind) -> &'static str {
 fn first_copy_source(destination: TriggerKind) -> TriggerKind {
     match destination {
         TriggerKind::Death => TriggerKind::AbilityUse,
-        TriggerKind::Kill | TriggerKind::Assist | TriggerKind::AbilityUse | TriggerKind::AbilityCooldownReady => {
-            TriggerKind::Death
-        }
+        TriggerKind::Kill
+        | TriggerKind::Assist
+        | TriggerKind::AbilityUse
+        | TriggerKind::AbilityCooldownReady => TriggerKind::Death,
     }
 }
 
@@ -2646,7 +2940,10 @@ fn toggle_button(ui: &mut Ui, value: &mut bool) {
 
 fn draw_listener_status(ui: &mut Ui, status: &ListenerStatus, last_event: Option<&BridgeEvent>) {
     let (phase_label, phase_tone) = match status.phase {
-        ListenerPhase::Stopped => ("Listener stopped.".to_owned(), crate::theme::BadgeTone::Neutral),
+        ListenerPhase::Stopped => (
+            "Listener stopped.".to_owned(),
+            crate::theme::BadgeTone::Neutral,
+        ),
         ListenerPhase::WaitingForFile => (
             "Listener waiting for console.log to be created.".to_owned(),
             crate::theme::BadgeTone::Warning,
@@ -2943,7 +3240,6 @@ mod tests {
             queued_at: Instant::now(),
         });
         let label = status.label();
-        assert!(label.contains("Lovense"));
         assert!(label.contains("group"));
         assert!(label.contains("15/20 for 3 s"));
         assert!(label.contains("ability cooldown ready slot 2"));
@@ -2954,7 +3250,7 @@ mod tests {
     #[test]
     fn reset_clears_durable_banks_and_runtime_action_state() {
         let mut state = AppState::default();
-        state.provider_settings.lovense.domain = "custom.lan".into();
+        state.provider_settings.lovense_mut().domain = "custom.lan".into();
         state.triggers.death.actions.mode = VibrateMode::Fixed;
         assert!(state.reset_saved_state());
         assert_eq!(state.provider_settings, ProviderSettings::default());
@@ -3024,7 +3320,7 @@ mod tests {
         ] {
             for mode in [VibrateMode::Interval, VibrateMode::Fixed] {
                 let context = egui::Context::default();
-        crate::theme::install_fonts(&context);
+                crate::theme::install_fonts(&context);
                 let mut state = AppState::default();
                 state.selected_section = AppSection::Effects;
                 state.selected_effect = kind;
@@ -3376,18 +3672,19 @@ mod tests {
     #[test]
     fn reset_is_blocked_by_each_in_flight_work_kind() {
         let mut connection_busy = AppState {
-            provider_settings: ProviderSettings {
-                lovense: crate::provider::LovenseSetup {
-                    domain: "keep.lan".to_owned(),
-                    ..Default::default()
-                },
-            },
+            provider_settings: ProviderSettings::Lovense(crate::provider::LovenseSetup {
+                domain: "keep.lan".to_owned(),
+                ..Default::default()
+            }),
             ..AppState::default()
         };
         let (_sender, receiver) = mpsc::channel();
         connection_busy.connection_result = Some(receiver);
         assert!(!connection_busy.reset_saved_state());
-        assert_eq!(connection_busy.provider_settings.lovense.domain, "keep.lan");
+        assert_eq!(
+            connection_busy.provider_settings.lovense().domain,
+            "keep.lan"
+        );
         let mut test_busy = AppState::default();
         let (_sender, receiver) = mpsc::channel();
         test_busy.test_action_result = Some(receiver);
@@ -3416,7 +3713,10 @@ mod tests {
             .unwrap();
         state.poll_device_refresh();
         assert!(state.device_refresh_result.is_none());
-        assert_eq!(state.devices, vec![ProviderTarget::new("fresh-toy", "Fresh")]);
+        assert_eq!(
+            state.devices,
+            vec![ProviderTarget::new("fresh-toy", "Fresh")]
+        );
         assert_eq!(state.selected_device, Some("fresh-toy".to_owned()));
     }
 
@@ -3427,7 +3727,7 @@ mod tests {
         let mut app = CompanionApp::load_from_path_with_detector(path.clone(), || {
             Err(DetectionError::DeadlockNotInstalled)
         });
-        app.state.provider_settings.lovense.domain = "custom.lan".to_owned();
+        app.state.provider_settings.lovense_mut().domain = "custom.lan".to_owned();
         app.state.preferred_target = Some("group".to_owned());
         app.state.triggers.death.actions.mode = VibrateMode::Fixed;
         app.state.triggers.death.actions.fixed.strength = 18.0;

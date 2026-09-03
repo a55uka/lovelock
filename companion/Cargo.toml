@@ -20,6 +20,13 @@ tempfile = "3"
 log = "0.4"
 env_logger = "0.11"
 egui-phosphor = "0.13.0"
+buttplug_client = "11"
+buttplug_core = "11"
+buttplug_transport_websocket_tungstenite = "11"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+buttplug_client_in_process = "11"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

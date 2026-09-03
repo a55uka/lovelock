@@ -144,9 +144,8 @@ impl VibrateActionSettings {
         rng: &mut R,
     ) -> Result<ResolvedVibrateAction, ActionValidationError> {
         let strength = match self.mode {
-            VibrateMode::Fixed => {
-                portable_strength(self.fixed.strength).ok_or(ActionValidationError::InvalidStrength)?
-            }
+            VibrateMode::Fixed => portable_strength(self.fixed.strength)
+                .ok_or(ActionValidationError::InvalidStrength)?,
             VibrateMode::Interval => {
                 let minimum = portable_strength(self.interval.minimum_strength)
                     .ok_or(ActionValidationError::InvalidStrength)?;
