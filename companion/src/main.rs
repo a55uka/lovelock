@@ -8,6 +8,7 @@ pub mod deadlock_path;
 pub mod logging;
 pub mod persistence;
 pub mod provider;
+pub mod providers;
 pub mod theme;
 pub mod version_check;
 use app::CompanionApp;

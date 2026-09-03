@@ -15,9 +15,10 @@ use crate::action::{
 use crate::app::{
     AbilityFilter, AbilityTriggerSettings, AppState, TriggerSettings, TriggerSettingsSet,
 };
-use crate::provider::{LovenseSetup, ProviderSettings, TargetId};
+use crate::provider::{IntifaceSetup, LocalSetup, LovenseSetup, ProviderSettings, TargetId};
+use crate::providers::ProviderKind;
 
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 pub const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,7 +88,21 @@ impl Default for PersistedAbilityFilter {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedProviderSettings {
+    kind: PersistedProviderKind,
     lovense: PersistedLovenseSetup,
+    intiface: PersistedIntifaceSetup,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PersistedProviderKind {
+    Lovense,
+    Local,
+    Intiface,
+}
+impl Default for PersistedProviderKind {
+    fn default() -> Self {
+        Self::Lovense
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,6 +116,18 @@ impl Default for PersistedLovenseSetup {
         Self {
             domain: setup.domain,
             http_port: setup.http_port,
+        }
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedIntifaceSetup {
+    websocket_url: String,
+}
+impl Default for PersistedIntifaceSetup {
+    fn default() -> Self {
+        Self {
+            websocket_url: IntifaceSetup::default().websocket_url,
         }
     }
 }
@@ -196,7 +223,48 @@ impl Default for PersistedTriggers {
 impl Default for PersistedProviderSettings {
     fn default() -> Self {
         Self {
+            kind: PersistedProviderKind::default(),
             lovense: PersistedLovenseSetup::default(),
+            intiface: PersistedIntifaceSetup::default(),
+        }
+    }
+}
+impl PersistedProviderSettings {
+    fn from_settings(settings: &ProviderSettings) -> Self {
+        let kind = match settings.kind() {
+            ProviderKind::Lovense => PersistedProviderKind::Lovense,
+            ProviderKind::Local => PersistedProviderKind::Local,
+            ProviderKind::Intiface => PersistedProviderKind::Intiface,
+        };
+        let lovense = match settings {
+            ProviderSettings::Lovense(setup) => PersistedLovenseSetup {
+                domain: setup.domain.clone(),
+                http_port: setup.http_port,
+            },
+            _ => PersistedLovenseSetup::default(),
+        };
+        let intiface = match settings {
+            ProviderSettings::Intiface(setup) => PersistedIntifaceSetup {
+                websocket_url: setup.websocket_url.clone(),
+            },
+            _ => PersistedIntifaceSetup::default(),
+        };
+        Self {
+            kind,
+            lovense,
+            intiface,
+        }
+    }
+    fn to_settings(&self) -> ProviderSettings {
+        match self.kind {
+            PersistedProviderKind::Lovense => ProviderSettings::Lovense(LovenseSetup {
+                domain: self.lovense.domain.clone(),
+                http_port: self.lovense.http_port,
+            }),
+            PersistedProviderKind::Local => ProviderSettings::Local(LocalSetup),
+            PersistedProviderKind::Intiface => ProviderSettings::Intiface(IntifaceSetup {
+                websocket_url: self.intiface.websocket_url.clone(),
+            }),
         }
     }
 }
@@ -214,15 +282,11 @@ impl Default for PersistedState {
 
 impl PersistedState {
     pub(crate) fn from_app(app: &AppState) -> Self {
-        let setup = app.effective_provider_settings();
         let state = Self {
             schema_version: SCHEMA_VERSION,
-            provider_settings: PersistedProviderSettings {
-                lovense: PersistedLovenseSetup {
-                    domain: setup.lovense.domain,
-                    http_port: setup.lovense.http_port,
-                },
-            },
+            provider_settings: PersistedProviderSettings::from_settings(
+                &app.effective_provider_settings(),
+            ),
             preferred_target: app
                 .preferred_target
                 .as_ref()
@@ -234,12 +298,8 @@ impl PersistedState {
     }
     pub(crate) fn restore_app(&self) -> AppState {
         let mut app = AppState::default();
-        app.provider_settings = ProviderSettings {
-            lovense: LovenseSetup {
-                domain: self.provider_settings.lovense.domain.clone(),
-                http_port: self.provider_settings.lovense.http_port,
-            },
-        };
+        app.provider_settings = self.provider_settings.to_settings();
+        app.selected_provider = app.provider_settings.kind();
         app.preferred_target = self
             .preferred_target
             .as_ref()
@@ -257,7 +317,11 @@ impl PersistedState {
         }
         self.triggers.local_player_death.actions.vibrate.normalize();
         self.triggers.local_player_kill.actions.vibrate.normalize();
-        self.triggers.local_player_assist.actions.vibrate.normalize();
+        self.triggers
+            .local_player_assist
+            .actions
+            .vibrate
+            .normalize();
         self.triggers
             .ability_used
             .trigger
@@ -535,6 +599,13 @@ pub(crate) fn load_from_path(path: &Path) -> LoadOutcome {
             SCHEMA_VERSION => serde_json::from_str::<PersistedState>(&source)
                 .map(|state| (state, false))
                 .map_err(|error| error.to_string()),
+            7 => migrator::migrate_v7_to_v8(&source)
+                .and_then(|value| {
+                    serde_json::from_value::<PersistedState>(value)
+                        .map_err(|error| error.to_string())
+                })
+                .map(|state| (state, true))
+                .map_err(|error| error.to_string()),
             unsupported => Err(format!(
                 "unsupported schema version {unsupported}; expected {SCHEMA_VERSION}"
             )),
@@ -586,6 +657,43 @@ pub(crate) fn load_from_path(path: &Path) -> LoadOutcome {
                 migrated: false,
             }
         }
+    }
+}
+
+/// Handles upgrading older on-disk state files to the current `SCHEMA_VERSION`.
+/// Each migration consumes the raw source and returns a new JSON `Value` at the
+/// next schema version, so migrations can be chained forward.
+mod migrator {
+    use serde_json::{Value, json};
+
+    /// v7 (single Lovense provider) -> v8 (multi-provider). The new schema adds
+    /// a `provider_settings.kind` selector plus `intiface`/`local` fields; the
+    /// old single Lovense setup carries over unchanged with kind "lovense".
+    pub(super) fn migrate_v7_to_v8(source: &str) -> Result<Value, String> {
+        let mut value: Value = serde_json::from_str(source)
+            .map_err(|error| format!("could not read v7 state: {error}"))?;
+        value["schema_version"] = json!(super::SCHEMA_VERSION);
+
+        let old_lovense = value
+            .get("provider_settings")
+            .and_then(|settings| settings.get("lovense"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        let lovense = json!({
+            "domain": old_lovense.get("domain").cloned().unwrap_or_else(|| json!("")),
+            "http_port": old_lovense.get("http_port").cloned().unwrap_or_else(|| json!(0)),
+        });
+
+        value["provider_settings"] = json!({
+            "kind": "lovense",
+            "lovense": lovense,
+            "intiface": {
+                "websocket_url": super::IntifaceSetup::default().websocket_url,
+            },
+        });
+
+        Ok(value)
     }
 }
 
@@ -1012,8 +1120,8 @@ mod tests {
     #[test]
     fn round_trip_preserves_provider_target_filters_and_actions() {
         let mut original = AppState::default();
-        original.provider_settings.lovense.domain = "192.168.1.2".to_owned();
-        original.provider_settings.lovense.http_port = 30010;
+        original.provider_settings.lovense_mut().domain = "192.168.1.2".to_owned();
+        original.provider_settings.lovense_mut().http_port = 30010;
         original.preferred_target = Some("toy-id".to_owned());
         original.triggers.death.enabled = false;
         original.triggers.death.actions.mode = VibrateMode::Fixed;
@@ -1052,7 +1160,10 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string_pretty(&persisted).unwrap()).unwrap();
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
-        assert_eq!(value["provider_settings"]["lovense"]["domain"], "192.168.1.2");
+        assert_eq!(
+            value["provider_settings"]["lovense"]["domain"],
+            "192.168.1.2"
+        );
         assert_eq!(value["preferred_target"]["id"], "toy-id");
         assert_eq!(
             value["triggers"]["local_player_death"]["actions"]["vibrate"]["fixed"]["strength"],
@@ -1325,5 +1436,37 @@ mod tests {
                 .unwrap()
                 .contains("previous disk state may return")
         );
+    }
+
+    #[test]
+    fn v7_state_is_migrated_to_v8_as_lovense() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let v7 = serde_json::json!({
+            "schema_version": 7,
+            "provider_settings": {
+                "lovense": { "domain": "192.168.1.2", "http_port": 30010 }
+            },
+            "preferred_target": { "id": "toy-id" },
+            "triggers": serde_json::to_value(
+                PersistedTriggers::default()
+            ).unwrap(),
+            "log_path": "/logs/console.log"
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&v7).unwrap()).unwrap();
+        let outcome = load_from_path(&path);
+        assert!(outcome.migrated);
+        assert!(outcome.warning.is_none());
+        assert_eq!(outcome.state.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            outcome.state.provider_settings.kind,
+            PersistedProviderKind::Lovense
+        );
+        assert_eq!(
+            outcome.state.provider_settings.lovense.domain,
+            "192.168.1.2"
+        );
+        assert_eq!(outcome.state.provider_settings.lovense.http_port, 30010);
+        assert_eq!(outcome.state.preferred_target.unwrap().id, "toy-id");
     }
 }

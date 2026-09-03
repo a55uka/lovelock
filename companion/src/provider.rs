@@ -1,12 +1,10 @@
 use std::fmt;
 
-use crate::action::ResolvedVibrateAction;
-use lovense::{Connection as LovenseConnection, Error as LovenseError, LovenseClient, Toy};
+use crate::providers::ProviderKind;
+use lovense::{Error as LovenseError, Toy};
 use thiserror::Error;
 
-pub const TEST_VIBRATE_STRENGTH: u8 = 8;
-pub const TEST_VIBRATE_DURATION_SECS: u32 = 1;
-
+/// Where to reach the local Lovense Connect/Remote HTTP server.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LovenseSetup {
     pub domain: String,
@@ -14,7 +12,7 @@ pub struct LovenseSetup {
 }
 impl Default for LovenseSetup {
     fn default() -> Self {
-        let connection = LovenseConnection::default();
+        let connection = lovense::Connection::default();
         Self {
             domain: connection.domain().to_owned(),
             http_port: connection.http_port(),
@@ -39,21 +37,94 @@ impl LovenseSetup {
     pub fn present(&self) -> bool {
         !self.domain.trim().is_empty() && self.http_port != 0
     }
-    fn connection(&self) -> LovenseConnection {
-        LovenseConnection::new(self.domain.trim(), self.http_port)
+}
+
+/// Configuration for the local (embedded buttplug) provider. It carries no
+/// address — the engine runs in-process and scans automatically.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LocalSetup;
+
+/// Configuration for connecting to an externally running Intiface Central (or
+/// any buttplug WebSocket server).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntifaceSetup {
+    pub websocket_url: String,
+}
+impl Default for IntifaceSetup {
+    fn default() -> Self {
+        Self {
+            websocket_url: "ws://127.0.0.1:12345".to_owned(),
+        }
+    }
+}
+impl IntifaceSetup {
+    pub fn normalized(&self) -> Self {
+        Self {
+            websocket_url: self.websocket_url.trim().to_owned(),
+        }
+    }
+    pub fn present(&self) -> bool {
+        !self.websocket_url.trim().is_empty()
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ProviderSettings {
-    pub lovense: LovenseSetup,
+/// The full provider configuration, keyed by which backend is active.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderSettings {
+    Lovense(LovenseSetup),
+    Local(LocalSetup),
+    Intiface(IntifaceSetup),
+}
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self::Lovense(LovenseSetup::default())
+    }
 }
 impl ProviderSettings {
+    pub fn kind(&self) -> ProviderKind {
+        match self {
+            Self::Lovense(_) => ProviderKind::Lovense,
+            Self::Local(_) => ProviderKind::Local,
+            Self::Intiface(_) => ProviderKind::Intiface,
+        }
+    }
     pub fn present(&self) -> bool {
-        self.lovense.present()
+        match self {
+            Self::Lovense(setup) => setup.present(),
+            Self::Local(_) => true,
+            Self::Intiface(setup) => setup.present(),
+        }
     }
     pub fn normalize(&mut self) {
-        self.lovense = self.lovense.normalized();
+        match self {
+            Self::Lovense(setup) => *setup = setup.normalized(),
+            Self::Local(_) => {}
+            Self::Intiface(setup) => *setup = setup.normalized(),
+        }
+    }
+    pub fn lovense(&self) -> &LovenseSetup {
+        match self {
+            Self::Lovense(setup) => setup,
+            _ => panic!("Lovense setup queried when provider is {:?}", self.kind()),
+        }
+    }
+    pub fn lovense_mut(&mut self) -> &mut LovenseSetup {
+        match self {
+            Self::Lovense(setup) => setup,
+            _ => panic!("Lovense setup mutated when provider is {:?}", self.kind()),
+        }
+    }
+    pub fn intiface(&self) -> &IntifaceSetup {
+        match self {
+            Self::Intiface(setup) => setup,
+            _ => panic!("Intiface setup queried when provider is {:?}", self.kind()),
+        }
+    }
+    pub fn intiface_mut(&mut self) -> &mut IntifaceSetup {
+        match self {
+            Self::Intiface(setup) => setup,
+            _ => panic!("Intiface setup mutated when provider is {:?}", self.kind()),
+        }
     }
 }
 
@@ -86,20 +157,26 @@ impl ProviderTarget {
     pub fn name(&self) -> &str {
         &self.name
     }
-    #[cfg(test)]
-    pub(crate) fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+    pub fn new_any(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             toy: None,
         }
     }
-}
-fn target_from_lovense(toy: Toy) -> ProviderTarget {
-    ProviderTarget {
-        id: toy.id.clone(),
-        name: toy.name.clone(),
-        toy: Some(toy),
+    pub(crate) fn from_lovense(toy: Toy) -> Self {
+        Self {
+            id: toy.id.clone(),
+            name: toy.name.clone(),
+            toy: Some(toy),
+        }
+    }
+    pub(crate) fn toy(&self) -> Option<&Toy> {
+        self.toy.as_ref()
+    }
+    #[cfg(test)]
+    pub(crate) fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::new_any(id, name)
     }
 }
 
@@ -107,9 +184,11 @@ fn target_from_lovense(toy: Toy) -> ProviderTarget {
 pub enum ProviderError {
     #[error("Lovense: {0}")]
     Lovense(#[from] LovenseError),
-    #[error("Lovense setup is invalid")]
+    #[error("{0}")]
+    Buttplug(String),
+    #[error("provider setup is invalid")]
     InvalidSetup,
-    #[error("Lovense is not connected")]
+    #[error("provider is not connected")]
     NotConnected,
 }
 impl ProviderError {
@@ -118,59 +197,31 @@ impl ProviderError {
     /// what gets logged.
     pub fn user_message(&self) -> String {
         match self {
-            Self::Lovense(LovenseError::EmptyDomain) => "Enter a connection domain first.".to_owned(),
+            Self::Lovense(LovenseError::EmptyDomain) => {
+                "Enter a connection domain first.".to_owned()
+            }
             Self::Lovense(LovenseError::Transport(_)) => {
                 "Can't reach the Lovense app. Is Game Mode on?".to_owned()
             }
-            Self::Lovense(LovenseError::HttpStatus(_)) => "Lovense app didn't respond as expected.".to_owned(),
-            Self::Lovense(LovenseError::Decode { .. }) => "Got an unexpected response from Lovense.".to_owned(),
+            Self::Lovense(LovenseError::HttpStatus(_)) => {
+                "Lovense app didn't respond as expected.".to_owned()
+            }
+            Self::Lovense(LovenseError::Decode { .. }) => {
+                "Got an unexpected response from Lovense.".to_owned()
+            }
             Self::Lovense(LovenseError::CommandRejected { message }) => {
                 format!("Lovense rejected the request: {message}")
             }
             Self::Lovense(LovenseError::NoToysAvailable) => "No toy connected yet.".to_owned(),
-            Self::Lovense(LovenseError::ToyNotFound) => "That toy isn't connected anymore.".to_owned(),
-            Self::Lovense(LovenseError::InvalidStrength) | Self::Lovense(LovenseError::InvalidDuration) => {
-                self.to_string()
+            Self::Lovense(LovenseError::ToyNotFound) => {
+                "That toy isn't connected anymore.".to_owned()
             }
-            Self::InvalidSetup => "Enter a domain and port first.".to_owned(),
+            Self::Lovense(LovenseError::InvalidStrength)
+            | Self::Lovense(LovenseError::InvalidDuration) => self.to_string(),
+            Self::Buttplug(message) => message.clone(),
+            Self::InvalidSetup => "Enter the required connection settings first.".to_owned(),
             Self::NotConnected => "Not connected yet.".to_owned(),
         }
-    }
-}
-
-pub struct ConnectedProvider(LovenseClient);
-impl ConnectedProvider {
-    pub fn connect(setup: &LovenseSetup) -> Result<Self, ProviderError> {
-        if !setup.present() {
-            return Err(ProviderError::InvalidSetup);
-        }
-        Ok(Self(LovenseClient::connect(setup.connection())?))
-    }
-    pub fn list_targets(&self) -> Result<Vec<ProviderTarget>, ProviderError> {
-        Ok(self
-            .0
-            .list_toys()?
-            .into_iter()
-            .map(target_from_lovense)
-            .collect())
-    }
-    pub fn test_action(&self, target: Option<&ProviderTarget>) -> Result<(), ProviderError> {
-        let toy = target.and_then(|target| target.toy.as_ref());
-        self.0
-            .vibrate(toy, TEST_VIBRATE_STRENGTH, TEST_VIBRATE_DURATION_SECS)?;
-        Ok(())
-    }
-    pub fn execute(
-        &self,
-        target: Option<&ProviderTarget>,
-        action: ResolvedVibrateAction,
-    ) -> Result<(), ProviderError> {
-        let toy = target.and_then(|target| target.toy.as_ref());
-        self.0.vibrate(toy, action.strength, action.duration_secs)?;
-        Ok(())
-    }
-    pub fn disconnect(self) -> Result<(), ProviderError> {
-        Ok(())
     }
 }
 
@@ -199,14 +250,30 @@ mod tests {
     }
 
     #[test]
-    fn connect_rejects_incomplete_setup_before_any_request() {
-        let setup = LovenseSetup {
-            domain: String::new(),
-            http_port: 30010,
-        };
-        assert!(matches!(
-            ConnectedProvider::connect(&setup),
-            Err(ProviderError::InvalidSetup)
-        ));
+    fn defaults_select_lovense_with_working_setup() {
+        let settings = ProviderSettings::default();
+        assert_eq!(settings.kind(), ProviderKind::Lovense);
+        assert!(settings.present());
+    }
+
+    #[test]
+    fn local_and_intiface_presence() {
+        assert!(ProviderSettings::Local(LocalSetup).present());
+        assert!(ProviderSettings::Intiface(IntifaceSetup::default()).present());
+        assert!(
+            !ProviderSettings::Intiface(IntifaceSetup {
+                websocket_url: "  ".to_owned(),
+            })
+            .present()
+        );
+    }
+
+    #[test]
+    fn provider_kind_normalizes_its_own_fields() {
+        let mut settings = ProviderSettings::Intiface(IntifaceSetup {
+            websocket_url: "  ws://x  ".to_owned(),
+        });
+        settings.normalize();
+        assert_eq!(settings.intiface().websocket_url, "ws://x");
     }
 }

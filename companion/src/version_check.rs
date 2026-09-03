@@ -472,7 +472,7 @@ mod tests {
 
         let (endpoint, _) = serve_once(
             "200 OK",
-            br#"{"tag_name":"v0.2.0"}"#.to_vec(),
+            br#"{"tag_name":"v0.3.0"}"#.to_vec(),
             Duration::ZERO,
         );
         let mut owner =
@@ -483,13 +483,13 @@ mod tests {
         wait_for_completion(&mut owner);
         assert!(matches!(
             owner.state,
-            VersionCheckState::UpdateAvailable { ref latest } if latest == &version("0.2.0")
+            VersionCheckState::UpdateAvailable { ref latest } if latest == &version("0.3.0")
         ));
         assert!(repaint_count.load(AtomicOrdering::Relaxed) > 0);
 
         let (retry_endpoint, _) = serve_once(
             "200 OK",
-            br#"{"tag_name":"v0.1.0"}"#.to_vec(),
+            br#"{"tag_name":"v0.2.0"}"#.to_vec(),
             Duration::ZERO,
         );
         owner.endpoint = retry_endpoint;
@@ -498,7 +498,7 @@ mod tests {
         wait_for_completion(&mut owner);
         assert!(matches!(
             owner.state,
-            VersionCheckState::Current { ref latest } if latest == &version("0.1.0")
+            VersionCheckState::Current { ref latest } if latest == &version("0.2.0")
         ));
     }
 }
