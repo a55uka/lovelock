@@ -1758,7 +1758,11 @@ impl AppState {
         ));
         ui.add_space(4.0);
         ui.label(
-            "Runs a built-in buttplug engine inside the companion, so no separate Intiface Central is needed. Connect first, then toggle scanning on to find your toys.",
+            "Runs a built-in buttplug engine inside the companion, so no separate Intiface Central is needed. Scanning starts automatically once the engine is running — keep it on while your toy is discoverable; toys usually show up within a few seconds.",
+        );
+        ui.add_space(8.0);
+        ui.small(
+            "Lovense over direct Bluetooth: close the Lovense Remote app (or disconnect the toy in it) first — a toy already holding a Bluetooth connection can't be found by a second app. Alternatively, leave Game Mode on with internet access and the engine will pick the toy up through the Lovense Connect relay instead. Also check: Bluetooth is on, the toy is unpaired from the OS Bluetooth settings, and it is awake/pairing.",
         );
         ui.add_space(14.0);
 

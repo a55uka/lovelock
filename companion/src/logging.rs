@@ -181,9 +181,9 @@ fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
 pub fn init_logging() -> LogStore {
     let store = LogStore::new();
     let writer = CapturingWriter::new(store.clone(), io::stderr());
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("warn,companion=info,lovense=debug"),
-    )
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
+        "warn,companion=info,lovense=debug,buttplug_client=info,buttplug_server=info",
+    ))
     .format_timestamp_millis()
     .format_module_path(true)
     .target(env_logger::Target::Pipe(Box::new(writer)))

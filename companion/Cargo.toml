@@ -27,8 +27,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 buttplug_client_in_process = "11"
+buttplug_server = "11"
+buttplug_server_device_config = "11"
+buttplug_server_hwmgr_btleplug = "11"
+buttplug_server_hwmgr_lovense_connect = "11"
+buttplug_server_hwmgr_lovense_dongle = "11"
+buttplug_server_hwmgr_websocket = "11"
 
 [target.'cfg(windows)'.dependencies]
+buttplug_server_hwmgr_xinput = "11"
 winreg = "0.56"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
