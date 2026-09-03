@@ -36,16 +36,11 @@ pub struct AbilityTriggerSettings {
     pub trigger: TriggerSettings,
     pub ability_filter: AbilityFilter,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum AbilityFilter {
+    #[default]
     All,
     Selected(BTreeSet<u32>),
-}
-
-impl Default for AbilityFilter {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 impl AbilityFilter {
@@ -2354,6 +2349,9 @@ impl CompanionApp {
         app
     }
 
+    // Test-only helper: production code always goes through
+    // `load_from_path_with_detector_and_store` with the shared log store.
+    #[cfg(test)]
     fn load_from_path_with_detector<F>(path: PathBuf, detector: F) -> Self
     where
         F: FnOnce() -> Result<Detection, DetectionError>,
@@ -3093,8 +3091,10 @@ mod tests {
 
     #[test]
     fn action_resolution_is_an_immutable_snapshot() {
-        let mut settings = VibrateActionSettings::default();
-        settings.mode = VibrateMode::Fixed;
+        let mut settings = VibrateActionSettings {
+            mode: VibrateMode::Fixed,
+            ..Default::default()
+        };
         settings.fixed.strength = 14.0;
         settings.fixed.duration_seconds = 3.0;
         let mut rng = StdRng::seed_from_u64(4);
@@ -3325,8 +3325,10 @@ mod tests {
             for mode in [VibrateMode::Interval, VibrateMode::Fixed] {
                 let context = egui::Context::default();
                 crate::theme::install_fonts(&context);
-                let mut state = AppState::default();
-                state.selected_section = AppSection::Effects;
+                let mut state = AppState {
+                    selected_section: AppSection::Effects,
+                    ..Default::default()
+                };
                 state.selected_effect = kind;
                 state.triggers.get_mut(kind).actions.mode = mode;
                 if matches!(
@@ -3707,8 +3709,10 @@ mod tests {
 
     #[test]
     fn device_refresh_replaces_stale_toy_list_without_reconnecting() {
-        let mut state = AppState::default();
-        state.devices = vec![ProviderTarget::new("stale-toy", "Stale")];
+        let mut state = AppState {
+            devices: vec![ProviderTarget::new("stale-toy", "Stale")],
+            ..Default::default()
+        };
         state.selected_device = Some("stale-toy".to_owned());
         let (sender, receiver) = mpsc::channel();
         state.device_refresh_result = Some(receiver);

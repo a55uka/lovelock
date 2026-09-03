@@ -204,8 +204,10 @@ mod tests {
 
     #[test]
     fn invalid_action_settings_return_typed_validation() {
-        let mut settings = VibrateActionSettings::default();
-        settings.mode = VibrateMode::Fixed;
+        let mut settings = VibrateActionSettings {
+            mode: VibrateMode::Fixed,
+            ..Default::default()
+        };
         settings.fixed.strength = 21.0;
         assert_eq!(
             settings.resolve_checked(),
@@ -215,8 +217,10 @@ mod tests {
 
     #[test]
     fn resolution_is_a_snapshot() {
-        let mut settings = VibrateActionSettings::default();
-        settings.mode = VibrateMode::Fixed;
+        let mut settings = VibrateActionSettings {
+            mode: VibrateMode::Fixed,
+            ..Default::default()
+        };
         settings.fixed.strength = 12.0;
         settings.fixed.duration_seconds = 4.0;
         let mut rng = StdRng::seed_from_u64(4);
@@ -234,8 +238,10 @@ mod tests {
 
     #[test]
     fn interval_mode_rejects_inverted_bounds() {
-        let mut settings = VibrateActionSettings::default();
-        settings.mode = VibrateMode::Interval;
+        let mut settings = VibrateActionSettings {
+            mode: VibrateMode::Interval,
+            ..Default::default()
+        };
         settings.interval.minimum_strength = 10.0;
         settings.interval.maximum_strength = 5.0;
         assert_eq!(

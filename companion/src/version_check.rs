@@ -25,18 +25,19 @@ struct LatestReleaseResponse {
     tag_name: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum VersionCheckState {
+    #[default]
     Checking,
-    Current { latest: Version },
-    UpdateAvailable { latest: Version },
-    Unavailable { reason: String },
-}
-
-impl Default for VersionCheckState {
-    fn default() -> Self {
-        Self::Checking
-    }
+    Current {
+        latest: Version,
+    },
+    UpdateAvailable {
+        latest: Version,
+    },
+    Unavailable {
+        reason: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

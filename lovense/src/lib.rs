@@ -241,7 +241,10 @@ fn validate_duration(duration_secs: u32) -> Result<(), Error> {
 }
 
 fn user_agent() -> String {
-    format!("deadlockshock-companion-lovense/{}", env!("CARGO_PKG_VERSION"))
+    format!(
+        "deadlockshock-companion-lovense/{}",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 #[derive(Deserialize)]

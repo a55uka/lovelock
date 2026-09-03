@@ -160,7 +160,9 @@ mod tests {
             "embedded device config must not be empty",
         );
         assert!(
-            config.base_communication_specifiers().contains_key("lovense"),
+            config
+                .base_communication_specifiers()
+                .contains_key("lovense"),
             "embedded device config must include the lovense protocol",
         );
         assert!(

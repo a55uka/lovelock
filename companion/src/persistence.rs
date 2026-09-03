@@ -85,24 +85,20 @@ impl Default for PersistedAbilityFilter {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedProviderSettings {
     kind: PersistedProviderKind,
     lovense: PersistedLovenseSetup,
     intiface: PersistedIntifaceSetup,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum PersistedProviderKind {
+    #[default]
     Lovense,
     Local,
     Intiface,
-}
-impl Default for PersistedProviderKind {
-    fn default() -> Self {
-        Self::Lovense
-    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -217,15 +213,6 @@ impl Default for PersistedTriggers {
                 },
                 ability_filter: PersistedAbilityFilter::default(),
             },
-        }
-    }
-}
-impl Default for PersistedProviderSettings {
-    fn default() -> Self {
-        Self {
-            kind: PersistedProviderKind::default(),
-            lovense: PersistedLovenseSetup::default(),
-            intiface: PersistedIntifaceSetup::default(),
         }
     }
 }
@@ -808,7 +795,7 @@ fn open_directory(path: &Path) -> Result<(), String> {
     spawn_directory_opener("explorer", path)
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 fn spawn_directory_opener(program: &str, path: &Path) -> Result<(), String> {
     // Explorer commonly exits with code 1 after successfully handing the folder
     // off to the existing shell process, so only failure to launch is an error.

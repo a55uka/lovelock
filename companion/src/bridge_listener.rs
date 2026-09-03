@@ -948,13 +948,13 @@ fn seed_metadata_from_tail(
     if start > 0 {
         let _ = lines.next();
     }
-    let newest = lines.filter_map(|line| {
+    let mut newest = lines.filter_map(|line| {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         std::str::from_utf8(line)
             .ok()
             .and_then(parse_bridge_metadata)
     });
-    if let Some(metadata) = newest.last() {
+    if let Some(metadata) = newest.next_back() {
         lock_unpoisoned(status).mod_version = metadata.mod_version;
     }
     Ok(())
