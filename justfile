@@ -7,6 +7,9 @@
 #   just build               # build dist/deadlock_death_hook.vpk
 #   just build out.vpk       # build to a different path
 #   just clean               # remove dist/ and CSDK build dirs
+#   just companion-build     # debug build of the Rust companion
+#   just companion-run       # debug build + launch the companion
+#   just companion-test      # run the Rust test suite
 #
 # Override the CSDK location with `csdk=...` or $DEADLOCK_CSDK.
 # On Windows an empty value lets scripts/build.ps1 auto-detect the install.
@@ -41,6 +44,28 @@ _clean-unix:
     if [ -n "{{csdk}}" ]; then
         rm -rf "{{csdk}}/content/citadel_addons/death_http_bridge" "{{csdk}}/game/citadel_addons/death_http_bridge"
     fi
+
+# ---- Rust companion (native cargo, same on Windows and Linux) ----
+
+# debug build of the companion (pass extra cargo args, e.g. `just companion-build --release`)
+companion-build *args:
+    cargo build --manifest-path "{{justfile_directory()}}/companion/Cargo.toml" {{args}}
+
+# debug build + launch, mirroring scripts/build_and_run.bat
+companion-run *args:
+    cargo run --manifest-path "{{justfile_directory()}}/companion/Cargo.toml" {{args}}
+
+# release build of the companion
+companion-release *args:
+    cargo build --locked --release --manifest-path "{{justfile_directory()}}/companion/Cargo.toml" {{args}}
+
+# Rust test suite (companion + lovense crates)
+companion-test *args:
+    cargo test --manifest-path "{{justfile_directory()}}/companion/Cargo.toml" {{args}}
+
+# fast typecheck without producing binaries
+companion-check *args:
+    cargo check --manifest-path "{{justfile_directory()}}/companion/Cargo.toml" {{args}}
 
 default:
     @just --list

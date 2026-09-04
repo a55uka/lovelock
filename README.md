@@ -69,10 +69,10 @@ and published separately ([DeadlockShock repo](https://github.com/VolcanoCookies
 You will need [Rust](https://rust-lang.org/), [PowerShell](https://learn.microsoft.com/en-us/powershell/), and [Reduced CSDK 12](https://deadlockmodding.pages.dev/modding-tools/csdk-12).
 
 ```sh
-cargo run --manifest-path companion/Cargo.toml --release
+just companion-run --release
 ```
 
-On Windows, `scripts/build_and_run.bat` builds Lovelock Companion in debug mode and launches it in one step, which is handy while iterating.
+`just companion-build`, `just companion-test`, and `just companion-check` cover the debug build, test suite, and fast typecheck. On Windows, `scripts/build_and_run.bat` builds Lovelock Companion in debug mode and launches it in one step, which is handy while iterating.
 Linux builds are possible but currently take some manual effort, hopefully I will soon make it easier!
 
 ## Usage details
