@@ -1,3 +1,6 @@
+# NOTICE:
+## Will be writing a buttplug.io mod and companion app from scratch for Deadlock instead of working more on this project, it is fully working if you want to use it but it will be replaced soon (by something better :3)
+
 <a href="https://gamebanana.com/mods/710227"><img src="https://gamebanana.com/mods/embeddables/710227?type=large" alt="Lovelock mod on GameBanana" /></a>
 
 # Lovelock Companion
