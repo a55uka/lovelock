@@ -72,7 +72,7 @@ You will need [Rust](https://rust-lang.org/), [PowerShell](https://learn.microso
 cargo run --manifest-path companion/Cargo.toml --release
 ```
 
-On Windows, `build_and_run.bat` builds Lovelock Companion in debug mode and launches it in one step, which is handy while iterating.
+On Windows, `scripts/build_and_run.bat` builds Lovelock Companion in debug mode and launches it in one step, which is handy while iterating.
 Linux builds are possible but currently take some manual effort, hopefully I will soon make it easier!
 
 ## Usage details
