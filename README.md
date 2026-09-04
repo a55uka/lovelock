@@ -73,7 +73,7 @@ just companion-run --release
 ```
 
 `just companion-build`, `just companion-test`, and `just companion-check` cover the debug build, test suite, and fast typecheck. On Windows, `scripts/build_and_run.bat` builds Lovelock Companion in debug mode and launches it in one step, which is handy while iterating.
-Linux builds are possible but currently take some manual effort, hopefully I will soon make it easier!
+On Linux, `just build` runs the CSDK tools under Proton via `protontricks-launch` (Steam app 4217940's prefix by default, override with `PROTON_APPID=...`).
 
 ## Usage details
 

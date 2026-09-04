@@ -1,7 +1,8 @@
 # Build the death_http_bridge Deadlock addon.
 #
 # Windows: runs scripts/build.ps1 with PowerShell (native CSDK tools).
-# Linux:   runs scripts/build.sh, which runs the CSDK tools under Wine.
+# Linux:   runs scripts/build.sh, which runs the CSDK tools under Proton
+#          (via protontricks-launch; plain Wine can't init D3D11).
 #
 # Usage:
 #   just build               # build dist/deadlock_death_hook.vpk
